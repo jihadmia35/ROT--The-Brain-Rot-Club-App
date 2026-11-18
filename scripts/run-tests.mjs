@@ -53,10 +53,17 @@ function loadTsModule(filePath) {
 }
 
 async function main() {
-  const testFile = path.join(ROOT, 'src', 'utils', '__tests__', 'domainLogic.test.ts');
+  const testDir = path.join(ROOT, 'src', 'utils', '__tests__');
   const harnessFile = path.join(ROOT, 'src', 'utils', 'testHarness.ts');
+  const testFiles = fs
+    .readdirSync(testDir)
+    .filter((name) => name.endsWith('.test.ts'))
+    .sort()
+    .map((name) => path.join(testDir, name));
 
-  loadTsModule(testFile);
+  for (const testFile of testFiles) {
+    loadTsModule(testFile);
+  }
   const harness = loadTsModule(harnessFile);
   const tests = harness.getRegisteredTests();
 

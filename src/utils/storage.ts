@@ -1,96 +1,40 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { PersistedAppState } from '../constants/types';
+import { CloudProfile } from './authHelpers';
 import {
-  createInitialPersistedState,
-  evaluateStreakState,
-  getLocalDateKey,
-  getXpLedgerEntries,
-  syncWeeklyQuestsState,
-} from './domainLogic';
+  AppStateStorageAdapter,
+  GUEST_STORAGE_KEY,
+  loadPersistedStateForOwner,
+  savePersistedStateForOwner,
+} from './accountStorageCore';
+import { getLocalDateKey } from './domainLogic';
 
-export const STORAGE_KEY = '@rot_executive_demo_state_v1';
+export const STORAGE_KEY = GUEST_STORAGE_KEY;
+
+const asyncStorageAdapter: AppStateStorageAdapter = {
+  getItem: (key) => AsyncStorage.getItem(key),
+  setItem: (key, value) => AsyncStorage.setItem(key, value),
+};
 
 export async function loadPersistedState(
-  dateKey: string = getLocalDateKey()
-): Promise<PersistedAppState> {
-  const fallback = createInitialPersistedState(dateKey);
-  try {
-    const raw = await AsyncStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return fallback;
-    }
-    const parsed = JSON.parse(raw) as Partial<PersistedAppState>;
-    let merged: PersistedAppState = {
-      ...fallback,
-      ...parsed,
-      schemaVersion: 3,
-      profile: {
-        ...fallback.profile,
-        ...(parsed.profile ?? {}),
-      },
-      settings: {
-        ...fallback.settings,
-        ...(parsed.settings ?? {}),
-      },
-      claimedXpEvents: {
-        ...fallback.claimedXpEvents,
-        ...(parsed.claimedXpEvents ?? {}),
-      },
-      missionsByDate: {
-        ...fallback.missionsByDate,
-        ...(parsed.missionsByDate ?? {}),
-      },
-      dailyChestByDate: {
-        ...fallback.dailyChestByDate,
-        ...(parsed.dailyChestByDate ?? {}),
-      },
-      unlockedBadges: {
-        ...fallback.unlockedBadges,
-        ...(parsed.unlockedBadges ?? {}),
-      },
-      streak: {
-        ...fallback.streak,
-        ...(parsed.streak ?? {}),
-        historyByDate: {
-          ...fallback.streak.historyByDate,
-          ...(parsed.streak?.historyByDate ?? {}),
-        },
-      },
-      weeklyQuestsByWeek: {
-        ...fallback.weeklyQuestsByWeek,
-        ...(parsed.weeklyQuestsByWeek ?? {}),
-      },
-      moodLogsByDate: {
-        ...fallback.moodLogsByDate,
-        ...(parsed.moodLogsByDate ?? {}),
-      },
-      xpLedger: Array.isArray(parsed.xpLedger) ? parsed.xpLedger : [],
-      sentNotificationsByDate: {
-        ...fallback.sentNotificationsByDate,
-        ...(parsed.sentNotificationsByDate ?? {}),
-      },
-    };
-
-    // Reconcile XP ledger entries from any v1/v2 claimedXpEvents and evaluate streak & weekly quests
-    const fullLedger = getXpLedgerEntries(merged).filter(
-      (e) => e.category !== 'baseline'
-    );
-    merged = {
-      ...merged,
-      xpLedger: fullLedger,
-    };
-    merged = evaluateStreakState(merged, dateKey);
-    merged = syncWeeklyQuestsState(merged, dateKey);
-    return merged;
-  } catch {
-    return fallback;
+  dateKey: string = getLocalDateKey(),
+  userId: string | null = null,
+  options?: {
+    templateState?: PersistedAppState | null;
+    cloudProfile?: CloudProfile | null;
   }
+): Promise<PersistedAppState> {
+  return loadPersistedStateForOwner(
+    asyncStorageAdapter,
+    userId,
+    dateKey,
+    options
+  );
 }
 
-export async function savePersistedState(state: PersistedAppState): Promise<void> {
-  try {
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch {
-    // Non-fatal local storage write error
-  }
+export async function savePersistedState(
+  state: PersistedAppState,
+  userId: string | null = null
+): Promise<void> {
+  await savePersistedStateForOwner(asyncStorageAdapter, userId, state);
 }

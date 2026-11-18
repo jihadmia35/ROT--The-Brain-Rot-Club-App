@@ -27,13 +27,14 @@ import {
   stepDailyLimitMinutes,
   UsageDisplayState,
 } from '../utils/domainLogic';
+import { CloudAccountIdentity, CloudAuthStatus } from '../utils/authHelpers';
 import Icon from '../components/Icon';
 
 type Props = {
   displayName: string;
   customDisplayName: string | null;
   deviceDefaultName: string | null;
-  onSaveDisplayName: (rawName: string | null) => void;
+  onSaveDisplayName: (rawName: string | null, alsoSyncToCloud?: boolean) => void;
   consentStatus: ConsentStatus;
   trackingEnabled: boolean;
   dailyLimitMinutes: number;
@@ -55,6 +56,29 @@ type Props = {
   onExportUserData: () => void;
   exportJsonPreview: string;
   onSendTestNotification: () => void;
+  cloudAuthStatus: CloudAuthStatus;
+  cloudIdentity: CloudAccountIdentity | null;
+  cloudProfile: {
+    share_squad_status: boolean;
+    status_band: string;
+    timezone: string;
+  } | null;
+  cloudSyncBusy?: boolean;
+  pendingCloudXpCount?: number;
+  cloudNotifPrefs: {
+    squad_invites_enabled: boolean;
+    squad_activity_enabled: boolean;
+  };
+  authBusy: boolean;
+  authError: string | null;
+  onSignInWithGoogle: () => void;
+  onSignOutCloud: () => void;
+  onToggleShareSquadStatus: () => void;
+  onToggleCloudNotifPref: (
+    key: 'squad_invites_enabled' | 'squad_activity_enabled'
+  ) => void;
+  onSyncLocalNameToCloud: () => void;
+  onFlushCloudXp?: () => void;
 };
 
 function SettingRow({
@@ -116,9 +140,24 @@ export default function SettingsScreen({
   onExportUserData,
   exportJsonPreview,
   onSendTestNotification,
+  cloudAuthStatus,
+  cloudIdentity,
+  cloudProfile,
+  cloudSyncBusy = false,
+  pendingCloudXpCount = 0,
+  cloudNotifPrefs,
+  authBusy,
+  authError,
+  onSignInWithGoogle,
+  onSignOutCloud,
+  onToggleShareSquadStatus,
+  onToggleCloudNotifPref,
+  onSyncLocalNameToCloud,
+  onFlushCloudXp,
 }: Props) {
   const [confirmClear, setConfirmClear] = useState(false);
   const [draftName, setDraftName] = useState(customDisplayName ?? displayName);
+  const [syncNameToCloud, setSyncNameToCloud] = useState(false);
   const [customLimitInput, setCustomLimitInput] = useState(
     String(dailyLimitMinutes)
   );
@@ -198,8 +237,243 @@ export default function SettingsScreen({
         ROT works around your life. Never the other way around.
       </Text>
 
+      {/* ROT Club Cloud Account (Google Sign-In) */}
+      <Text style={styles.sectionEyebrow}>ROT CLUB ACCOUNT</Text>
+      <View style={styles.profileCard}>
+        <View style={styles.limitHeader}>
+          <View style={styles.settingIcon}>
+            <Icon name="users" size={18} color={COLORS.purple} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.settingTitle}>
+              {cloudAuthStatus === 'authenticated' && cloudIdentity
+                ? cloudIdentity.displayName
+                : cloudAuthStatus === 'unconfigured'
+                ? 'Guest Mode (Cloud not configured)'
+                : cloudAuthStatus === 'loading'
+                ? 'Checking Club session...'
+                : 'Guest Mode (Local only)'}
+            </Text>
+            <Text style={styles.settingDetail}>
+              {cloudAuthStatus === 'authenticated' && cloudIdentity
+                ? `${cloudIdentity.emailLabel} · Cloud XP: ${cloudIdentity.cloudXp} XP`
+                : cloudAuthStatus === 'unconfigured'
+                ? 'Add EXPO_PUBLIC_SUPABASE_URL, EXPO_PUBLIC_SUPABASE_ANON_KEY, and EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID to enable Google Sign-In.'
+                : 'Sign in with Google to connect your encrypted Club session. Local guest XP stays separate on this device.'}
+            </Text>
+            {cloudAuthStatus === 'authenticated' && cloudIdentity ? (
+              <Text style={styles.cloudMetaSmall} selectable>
+                Member ID: {cloudIdentity.userId}
+              </Text>
+            ) : null}
+          </View>
+        </View>
+
+        <View style={styles.statusBadgesRow}>
+          <View style={styles.statusBadge}>
+            <View
+              style={[
+                styles.statusDot,
+                {
+                  backgroundColor:
+                    cloudAuthStatus === 'authenticated'
+                      ? COLORS.green
+                      : cloudAuthStatus === 'unconfigured'
+                      ? COLORS.orange
+                      : COLORS.purple,
+                },
+              ]}
+            />
+            <Text style={styles.statusBadgeText}>
+              {cloudAuthStatus === 'authenticated'
+                ? 'Signed in via Google'
+                : cloudAuthStatus === 'unconfigured'
+                ? 'Env config required'
+                : cloudAuthStatus === 'loading'
+                ? 'Restoring session'
+                : 'Guest Mode'}
+            </Text>
+          </View>
+          {cloudAuthStatus === 'authenticated' && cloudIdentity ? (
+            <View style={styles.statusBadge}>
+              <Text style={styles.statusBadgeText}>
+                Cloud XP: {cloudIdentity.cloudXp}
+              </Text>
+            </View>
+          ) : null}
+          {cloudAuthStatus === 'authenticated' && pendingCloudXpCount > 0 ? (
+            <View style={styles.statusBadge}>
+              <View
+                style={[styles.statusDot, { backgroundColor: COLORS.orange }]}
+              />
+              <Text style={styles.statusBadgeText}>
+                Queued XP sync: {pendingCloudXpCount}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+
+        {authError ? (
+          <View style={styles.feedbackBanner}>
+            <Icon name="alert-circle" size={14} color={COLORS.pink} />
+            <Text style={styles.feedbackBannerText}>{authError}</Text>
+          </View>
+        ) : null}
+
+        {cloudAuthStatus === 'authenticated' && cloudIdentity ? (
+          <>
+            <View style={styles.cloudPrivacyBox}>
+              <View style={styles.cloudPrivacyCopy}>
+                <Text style={styles.settingTitle}>
+                  Share daily target band with Squad
+                </Text>
+                <Text style={styles.settingDetail}>
+                  Off by default. Shares only Under target, Over target, or Hidden — never your exact Instagram minutes.
+                </Text>
+                <Text style={styles.cloudMetaSmall}>
+                  Current band:{' '}
+                  {cloudProfile?.share_squad_status
+                    ? cloudProfile.status_band.replace('_', ' ')
+                    : 'hidden'}{' '}
+                  · Timezone: {cloudProfile?.timezone ?? 'UTC'}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={[
+                  styles.toggle,
+                  cloudProfile?.share_squad_status && styles.toggleOn,
+                ]}
+                onPress={onToggleShareSquadStatus}
+                disabled={cloudSyncBusy}
+                activeOpacity={0.7}
+              >
+                <View
+                  style={[
+                    styles.toggleKnob,
+                    cloudProfile?.share_squad_status && styles.toggleKnobOn,
+                  ]}
+                />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.cloudPrivacyBox}>
+              <View style={styles.cloudPrivacyCopy}>
+                <Text style={styles.settingTitle}>Squad invite alerts</Text>
+                <Text style={styles.settingDetail}>
+                  Notify in ROT Notification Center when someone invites you to a Squad.
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={[
+                  styles.toggle,
+                  cloudNotifPrefs.squad_invites_enabled && styles.toggleOn,
+                ]}
+                onPress={() => onToggleCloudNotifPref('squad_invites_enabled')}
+                disabled={cloudSyncBusy}
+                activeOpacity={0.7}
+              >
+                <View
+                  style={[
+                    styles.toggleKnob,
+                    cloudNotifPrefs.squad_invites_enabled && styles.toggleKnobOn,
+                  ]}
+                />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.cloudPrivacyBox}>
+              <View style={styles.cloudPrivacyCopy}>
+                <Text style={styles.settingTitle}>Squad activity alerts</Text>
+                <Text style={styles.settingDetail}>
+                  Notify when members join, leave, or transfer squad ownership.
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={[
+                  styles.toggle,
+                  cloudNotifPrefs.squad_activity_enabled && styles.toggleOn,
+                ]}
+                onPress={() => onToggleCloudNotifPref('squad_activity_enabled')}
+                disabled={cloudSyncBusy}
+                activeOpacity={0.7}
+              >
+                <View
+                  style={[
+                    styles.toggleKnob,
+                    cloudNotifPrefs.squad_activity_enabled && styles.toggleKnobOn,
+                  ]}
+                />
+              </TouchableOpacity>
+            </View>
+
+            {displayName !== cloudIdentity.displayName ? (
+              <TouchableOpacity
+                style={styles.actionBtnSecondary}
+                onPress={onSyncLocalNameToCloud}
+                disabled={cloudSyncBusy}
+                activeOpacity={0.8}
+              >
+                <Icon name="arrow-up-right" size={13} color={COLORS.purple} />
+                <Text style={styles.actionBtnSecondaryText}>
+                  Use “{displayName}” as Cloud Squad name
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+
+            {pendingCloudXpCount > 0 && onFlushCloudXp ? (
+              <TouchableOpacity
+                style={styles.actionBtnSecondary}
+                onPress={onFlushCloudXp}
+                disabled={cloudSyncBusy}
+                activeOpacity={0.8}
+              >
+                <Icon name="refresh" size={13} color={COLORS.purple} />
+                <Text style={styles.actionBtnSecondaryText}>
+                  Retry pending Cloud XP sync ({pendingCloudXpCount})
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+
+            <TouchableOpacity
+              style={styles.actionBtnSecondary}
+              onPress={onSignOutCloud}
+              disabled={authBusy}
+              activeOpacity={0.8}
+            >
+              <Icon name="x" size={13} color={COLORS.purple} />
+              <Text style={styles.actionBtnSecondaryText}>
+                {authBusy ? 'Signing out...' : 'Sign out of Cloud Account'}
+              </Text>
+            </TouchableOpacity>
+          </>
+        ) : (
+          <TouchableOpacity
+            style={[
+              styles.actionBtnPrimary,
+              (authBusy || cloudAuthStatus === 'unconfigured') && {
+                opacity: 0.6,
+              },
+            ]}
+            onPress={onSignInWithGoogle}
+            disabled={authBusy || cloudAuthStatus === 'unconfigured'}
+            activeOpacity={0.8}
+          >
+            <Icon name="user" size={13} color={COLORS.white} />
+            <Text style={styles.actionBtnPrimaryText}>
+              {authBusy
+                ? 'Signing in...'
+                : cloudAuthStatus === 'unconfigured'
+                ? 'Google Sign-In Unavailable'
+                : 'Sign in with Google'}
+            </Text>
+          </TouchableOpacity>
+        )}
+      </View>
+
       {/* Profile & Display Name Section */}
-      <Text style={styles.sectionEyebrow}>PROFILE & DISPLAY NAME</Text>
+      <Text style={[styles.sectionEyebrow, { marginTop: 22 }]}>
+        PROFILE & DISPLAY NAME
+      </Text>
       <View style={styles.profileCard}>
         <View style={styles.limitHeader}>
           <View style={styles.settingIcon}>
@@ -224,7 +498,7 @@ export default function SettingsScreen({
             placeholderTextColor="#a395b2"
             autoCapitalize="words"
             returnKeyType="done"
-            onSubmitEditing={() => onSaveDisplayName(draftName)}
+            onSubmitEditing={() => onSaveDisplayName(draftName, syncNameToCloud)}
           />
           {draftName.length > 0 && (
             <TouchableOpacity
@@ -238,18 +512,39 @@ export default function SettingsScreen({
           )}
           <TouchableOpacity
             style={styles.nameSaveBtn}
-            onPress={() => onSaveDisplayName(draftName)}
+            onPress={() => onSaveDisplayName(draftName, syncNameToCloud)}
             activeOpacity={0.8}
           >
             <Text style={styles.nameSaveBtnText}>Save</Text>
           </TouchableOpacity>
         </View>
+        {cloudAuthStatus === 'authenticated' && cloudIdentity ? (
+          <TouchableOpacity
+            style={styles.cloudSyncChoiceRow}
+            onPress={() => setSyncNameToCloud((prev) => !prev)}
+            activeOpacity={0.75}
+          >
+            <View
+              style={[
+                styles.cloudSyncCheckbox,
+                syncNameToCloud && styles.cloudSyncCheckboxActive,
+              ]}
+            >
+              {syncNameToCloud ? (
+                <Icon name="check" size={10} color={COLORS.white} />
+              ) : null}
+            </View>
+            <Text style={styles.cloudSyncChoiceText}>
+              Also update Cloud Squad name when saving (currently “{cloudIdentity.displayName}”)
+            </Text>
+          </TouchableOpacity>
+        ) : null}
         {customDisplayName && (
           <TouchableOpacity
             style={styles.nameResetBtn}
             onPress={() => {
               setDraftName(deviceDefaultName || 'ROT User');
-              onSaveDisplayName(null);
+              onSaveDisplayName(null, syncNameToCloud);
             }}
             activeOpacity={0.8}
           >
@@ -259,7 +554,7 @@ export default function SettingsScreen({
           </TouchableOpacity>
         )}
         <Text style={styles.profileHint}>
-          Stored locally on this device only. No account, phone number, or contacts required.
+          Stored locally on this device by default. Cloud Squad sync only happens if you choose it.
         </Text>
       </View>
 
@@ -958,6 +1253,47 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: COLORS.muted,
     lineHeight: 15,
+  },
+  cloudPrivacyBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: '#f0e8f0',
+  },
+  cloudPrivacyCopy: {
+    flex: 1,
+  },
+  cloudMetaSmall: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: COLORS.purple,
+    marginTop: 4,
+  },
+  cloudSyncChoiceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  cloudSyncCheckbox: {
+    width: 18,
+    height: 18,
+    borderRadius: 5,
+    borderWidth: 1.5,
+    borderColor: COLORS.purple,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.white,
+  },
+  cloudSyncCheckboxActive: {
+    backgroundColor: COLORS.purple,
+  },
+  cloudSyncChoiceText: {
+    flex: 1,
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.ink,
   },
 
   // Settings List

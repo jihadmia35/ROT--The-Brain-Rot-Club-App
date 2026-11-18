@@ -29,6 +29,7 @@ import {
   MAX_MOOD_NOTE_LENGTH,
   UsageDisplayState,
 } from '../utils/domainLogic';
+import { CloudAccountIdentity, CloudAuthStatus } from '../utils/authHelpers';
 import MissionRow from '../components/MissionRow';
 import DailyChestCard from '../components/DailyChestCard';
 import Icon from '../components/Icon';
@@ -37,7 +38,7 @@ type Props = {
   displayName: string;
   customDisplayName: string | null;
   deviceDefaultName: string | null;
-  onSaveDisplayName: (rawName: string | null) => void;
+  onSaveDisplayName: (rawName: string | null, alsoSyncToCloud?: boolean) => void;
   completedMissions: number;
   earnedXp: number;
   missions: Mission[];
@@ -60,6 +61,13 @@ type Props = {
   todayMoodLog: MoodLogEntry | null;
   recentMoodLogs: MoodLogEntry[];
   onLogMood: (moodId: MoodId, note: string) => void;
+  cloudAuthStatus: CloudAuthStatus;
+  cloudIdentity: CloudAccountIdentity | null;
+  authBusy: boolean;
+  authError: string | null;
+  showSignInPrompt: boolean;
+  onSignInWithGoogle: () => void;
+  onDismissSignInPrompt: () => void;
 };
 
 export default function TodayScreen({
@@ -88,9 +96,17 @@ export default function TodayScreen({
   todayMoodLog,
   recentMoodLogs,
   onLogMood,
+  cloudAuthStatus,
+  cloudIdentity,
+  authBusy,
+  authError,
+  showSignInPrompt,
+  onSignInWithGoogle,
+  onDismissSignInPrompt,
 }: Props) {
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState(customDisplayName ?? displayName);
+  const [syncNameToCloud, setSyncNameToCloud] = useState(false);
   const [moodDrawerOpen, setMoodDrawerOpen] = useState(false);
   const [selectedMoodId, setSelectedMoodId] = useState<MoodId>(
     todayMoodLog?.moodId ?? 'balanced'
@@ -209,7 +225,7 @@ export default function TodayScreen({
                 autoCapitalize="words"
                 returnKeyType="done"
                 onSubmitEditing={() => {
-                  onSaveDisplayName(draftName);
+                  onSaveDisplayName(draftName, syncNameToCloud);
                   setEditingName(false);
                 }}
               />
@@ -226,7 +242,7 @@ export default function TodayScreen({
               <TouchableOpacity
                 style={styles.nameSaveBtn}
                 onPress={() => {
-                  onSaveDisplayName(draftName);
+                  onSaveDisplayName(draftName, syncNameToCloud);
                   setEditingName(false);
                 }}
                 activeOpacity={0.8}
@@ -237,7 +253,7 @@ export default function TodayScreen({
                 <TouchableOpacity
                   style={styles.nameResetBtn}
                   onPress={() => {
-                    onSaveDisplayName(null);
+                    onSaveDisplayName(null, syncNameToCloud);
                     setEditingName(false);
                   }}
                   activeOpacity={0.8}
@@ -246,6 +262,27 @@ export default function TodayScreen({
                 </TouchableOpacity>
               )}
             </View>
+            {cloudAuthStatus === 'authenticated' && cloudIdentity ? (
+              <TouchableOpacity
+                style={styles.cloudSyncChoiceRow}
+                onPress={() => setSyncNameToCloud((prev) => !prev)}
+                activeOpacity={0.75}
+              >
+                <View
+                  style={[
+                    styles.cloudSyncCheckbox,
+                    syncNameToCloud && styles.cloudSyncCheckboxActive,
+                  ]}
+                >
+                  {syncNameToCloud ? (
+                    <Icon name="check" size={10} color={COLORS.white} />
+                  ) : null}
+                </View>
+                <Text style={styles.cloudSyncChoiceText}>
+                  Also update Cloud Squad display name ({cloudIdentity.displayName})
+                </Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
         )}
 
@@ -253,6 +290,78 @@ export default function TodayScreen({
           Your scroll has a personality. Today, it is choosing balance.
         </Text>
       </View>
+
+      {/* Club Account / Google Sign-In Entry Card */}
+      {cloudAuthStatus === 'authenticated' && cloudIdentity ? (
+        <TouchableOpacity
+          style={styles.clubAccountPill}
+          onPress={onOpenSettings}
+          activeOpacity={0.8}
+        >
+          <View style={styles.clubAccountDot} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.clubAccountPillTitle} numberOfLines={1}>
+              Club Account · {cloudIdentity.displayName}
+            </Text>
+            <Text style={styles.clubAccountPillSub} numberOfLines={1}>
+              {cloudIdentity.emailLabel} · {cloudIdentity.cloudXp} Cloud XP
+            </Text>
+          </View>
+          <View style={styles.signedInPillBadge}>
+            <Text style={styles.signedInPillBadgeText}>Signed in</Text>
+          </View>
+          <Text style={styles.clubAccountManageText}>Manage</Text>
+          <Icon name="chevron-right" size={14} color={COLORS.purple} />
+        </TouchableOpacity>
+      ) : showSignInPrompt ? (
+        <View style={styles.authEntryCard}>
+          <View style={styles.authEntryTopRow}>
+            <View style={styles.authEntryIcon}>
+              <Icon name="users" size={17} color={COLORS.purple} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.authEntryTitle}>
+                Join ROT Club with Google
+              </Text>
+              <Text style={styles.authEntryDesc}>
+                Sign in to create your Cloud Club profile (starts at 0 Cloud XP).
+                Your local guest progress stays private on this device.
+              </Text>
+            </View>
+          </View>
+          {authError ? (
+            <Text style={styles.authEntryError}>{authError}</Text>
+          ) : null}
+          <View style={styles.authEntryBtnRow}>
+            <TouchableOpacity
+              style={[
+                styles.authGoogleBtn,
+                (authBusy || cloudAuthStatus === 'unconfigured') &&
+                  styles.authGoogleBtnDisabled,
+              ]}
+              onPress={onSignInWithGoogle}
+              disabled={authBusy || cloudAuthStatus === 'unconfigured'}
+              activeOpacity={0.8}
+            >
+              <Icon name="user" size={13} color={COLORS.white} />
+              <Text style={styles.authGoogleBtnText}>
+                {authBusy
+                  ? 'Signing in...'
+                  : cloudAuthStatus === 'unconfigured'
+                  ? 'Cloud Env Needed'
+                  : 'Continue with Google'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.authGuestBtn}
+              onPress={onDismissSignInPrompt}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.authGuestBtnText}>Continue as Guest</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : null}
 
       {/* Streak & Grace-Day Card */}
       <View style={styles.streakCard}>
@@ -832,6 +941,31 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     color: COLORS.pink,
+  },
+  cloudSyncChoiceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingTop: 4,
+  },
+  cloudSyncCheckbox: {
+    width: 18,
+    height: 18,
+    borderRadius: 5,
+    borderWidth: 1.5,
+    borderColor: COLORS.purple,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.white,
+  },
+  cloudSyncCheckboxActive: {
+    backgroundColor: COLORS.purple,
+  },
+  cloudSyncChoiceText: {
+    flex: 1,
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.ink,
   },
   subtitle: {
     fontSize: 14,
@@ -1485,4 +1619,127 @@ const styles = StyleSheet.create({
     backgroundColor: '#f7eff8',
   },
   earnedText: { fontSize: 11, color: COLORS.purple, flex: 1 },
+
+  // Cloud Account Entry / Status
+  clubAccountPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 11,
+    paddingHorizontal: 14,
+    borderRadius: RADIUS.lg,
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: '#dfd3eb',
+    marginBottom: 12,
+  },
+  clubAccountDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: COLORS.green,
+  },
+  clubAccountPillTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.ink,
+  },
+  clubAccountPillSub: {
+    fontSize: 10,
+    color: COLORS.muted,
+    marginTop: 2,
+  },
+  clubAccountManageText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: COLORS.purple,
+  },
+  signedInPillBadge: {
+    paddingVertical: 3,
+    paddingHorizontal: 7,
+    borderRadius: 10,
+    backgroundColor: '#e4f8ee',
+  },
+  signedInPillBadgeText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#1e7e4e',
+  },
+  authEntryCard: {
+    padding: 15,
+    borderRadius: RADIUS.lg,
+    backgroundColor: '#fcf9ff',
+    borderWidth: 1,
+    borderColor: '#dfd3eb',
+    marginBottom: 12,
+    gap: 10,
+  },
+  authEntryTopRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 11,
+  },
+  authEntryIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    backgroundColor: COLORS.lavender,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  authEntryTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: COLORS.ink,
+  },
+  authEntryDesc: {
+    fontSize: 11,
+    color: COLORS.muted,
+    marginTop: 3,
+    lineHeight: 16,
+  },
+  authEntryError: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.pink,
+    lineHeight: 15,
+  },
+  authEntryBtnRow: {
+    flexDirection: 'row',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  authGoogleBtn: {
+    flex: 1,
+    minWidth: 150,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    backgroundColor: COLORS.purple,
+  },
+  authGoogleBtnDisabled: {
+    opacity: 0.6,
+  },
+  authGoogleBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: COLORS.white,
+  },
+  authGuestBtn: {
+    paddingVertical: 10,
+    paddingHorizontal: 13,
+    borderRadius: 10,
+    backgroundColor: '#ece3f8',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  authGuestBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: COLORS.purple,
+  },
 });

@@ -79,6 +79,62 @@ import {
   subscribeToNativeNotificationUpdates,
   syncNativeNotificationConfig,
 } from './src/utils/usageStats';
+import {
+  AuthSessionLike,
+  CloudAuthStatus,
+  CloudProfile,
+  resolveCloudAccountIdentity,
+} from './src/utils/authHelpers';
+import { reconcileCloudUserXpWithProfile } from './src/utils/accountStorageCore';
+import {
+  buildProfileSyncPatch,
+  deriveCloudStatusBand,
+  formatSignInSuccessToast,
+  getDeviceTimezone,
+  ProfileUpdatePatch,
+} from './src/utils/cloudProfileCore';
+import { updateCloudProfile } from './src/utils/cloudProfile';
+import {
+  collectNewlyEarnedCloudXpEvents,
+} from './src/utils/cloudXpSyncCore';
+import {
+  enqueueCloudXpEventsForUser,
+  flushCloudXpQueueForUser,
+  getPendingCloudXpCount,
+} from './src/utils/cloudXpSync';
+import {
+  restoreCloudSession,
+  signInWithGoogle,
+  signOutFromCloud,
+  subscribeToCloudAuthChanges,
+} from './src/utils/auth';
+import {
+  fetchCloudProfile,
+  startSupabaseAutoRefreshLifecycle,
+} from './src/utils/supabase';
+import {
+  SocialNotificationRow,
+  SquadInvitationRow,
+} from './src/types/database.types';
+import {
+  buildPendingInviteMap,
+  computeCombinedUnreadNotificationCount,
+  DEFAULT_CLOUD_NOTIFICATION_PREFS,
+  DefaultNotificationPreferences,
+  markCloudNotificationsLocallyRead,
+  upsertCloudNotificationInList,
+} from './src/utils/cloudNotificationsCore';
+import {
+  fetchCloudNotificationPreferences,
+  fetchCloudNotificationsFeed,
+  markCloudNotificationsReadOnServer,
+  subscribeToCloudNotifications,
+  updateCloudNotificationPreferences,
+} from './src/utils/cloudNotifications';
+import {
+  acceptCloudSquadInvitation,
+  declineCloudSquadInvitation,
+} from './src/utils/cloudSquads';
 import TodayScreen from './src/screens/TodayScreen';
 import MissionsScreen from './src/screens/MissionsScreen';
 import BadgesScreen from './src/screens/BadgesScreen';
@@ -137,20 +193,207 @@ export default function App() {
   const [notificationCenterOpen, setNotificationCenterOpen] = useState(false);
   const [highlightedUnreadIds, setHighlightedUnreadIds] = useState<string[]>([]);
   const [scrollToLedgerRequestId, setScrollToLedgerRequestId] = useState(0);
+  const [cloudAuthStatus, setCloudAuthStatus] =
+    useState<CloudAuthStatus>('loading');
+  const [cloudSession, setCloudSession] = useState<AuthSessionLike | null>(null);
+  const [cloudProfile, setCloudProfile] = useState<CloudProfile | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authBannerDismissed, setAuthBannerDismissed] = useState(false);
+  const [cloudSyncBusy, setCloudSyncBusy] = useState(false);
+  const [pendingCloudXpCount, setPendingCloudXpCount] = useState(0);
+  const [cloudNotifications, setCloudNotifications] = useState<
+    SocialNotificationRow[]
+  >([]);
+  const [cloudPendingInvites, setCloudPendingInvites] = useState<
+    SquadInvitationRow[]
+  >([]);
+  const [cloudNotifPrefs, setCloudNotifPrefs] =
+    useState<DefaultNotificationPreferences>({
+      ...DEFAULT_CLOUD_NOTIFICATION_PREFS,
+    });
+  const [highlightedCloudUnreadIds, setHighlightedCloudUnreadIds] = useState<
+    string[]
+  >([]);
+  const [inviteActionBusy, setInviteActionBusy] = useState(false);
 
   const appStateRef = useRef(appState);
   appStateRef.current = appState;
+  const cloudAuthStatusRef = useRef(cloudAuthStatus);
+  cloudAuthStatusRef.current = cloudAuthStatus;
+  const cloudSessionRef = useRef(cloudSession);
+  cloudSessionRef.current = cloudSession;
+  const cloudProfileRef = useRef(cloudProfile);
+  cloudProfileRef.current = cloudProfile;
+  const loadedStateOwnerRef = useRef<string | null>(null);
+  const ownerSwitchSeqRef = useRef(0);
+  const deviceNameRef = useRef<string | null>(null);
   const lastAutoRefreshAtRef = useRef(0);
+  const lastProfilePatchSigRef = useRef<string | null>(null);
+  const profileSyncInFlightRef = useRef(false);
+
+  const flushPendingCloudXp = useCallback(
+    async (uidOverride?: string, profileOverride?: CloudProfile | null) => {
+      const uid = uidOverride ?? cloudSessionRef.current?.user?.id;
+      if (!uid || cloudAuthStatusRef.current !== 'authenticated') {
+        return;
+      }
+      const res = await flushCloudXpQueueForUser(
+        uid,
+        profileOverride ?? cloudProfileRef.current
+      );
+      if (
+        cloudAuthStatusRef.current !== 'authenticated' ||
+        cloudSessionRef.current?.user?.id !== uid
+      ) {
+        return;
+      }
+      setPendingCloudXpCount(res.remainingCount);
+      if (res.syncedCount > 0 || res.latestCloudXp !== null) {
+        const fresh = await fetchCloudProfile(uid);
+        if (
+          cloudAuthStatusRef.current !== 'authenticated' ||
+          cloudSessionRef.current?.user?.id !== uid
+        ) {
+          return;
+        }
+        if (fresh) {
+          setCloudProfile(fresh);
+          if (loadedStateOwnerRef.current === uid) {
+            setAppState((prev) => {
+              const reconciled = reconcileCloudUserXpWithProfile(prev, fresh);
+              if (!reconciled.changed) return prev;
+              void savePersistedState(reconciled.nextState, uid);
+              return reconciled.nextState;
+            });
+          }
+        } else if (res.latestCloudXp !== null) {
+          const nextXp = res.latestCloudXp;
+          setCloudProfile((prev) =>
+            prev ? { ...prev, cloud_xp: nextXp } : prev
+          );
+        }
+      }
+    },
+    []
+  );
+
+  const switchActiveOwnerState = useCallback(
+    async (
+      targetUserId: string | null,
+      options?: { cloudProfile?: CloudProfile | null }
+    ) => {
+      const seq = ++ownerSwitchSeqRef.current;
+
+      if (loadedStateOwnerRef.current === targetUserId && hydrated) {
+        if (targetUserId && options?.cloudProfile) {
+          setAppState((prev) => {
+            const reconciled = reconcileCloudUserXpWithProfile(
+              prev,
+              options.cloudProfile
+            );
+            if (!reconciled.changed) return prev;
+            void savePersistedState(reconciled.nextState, targetUserId);
+            return reconciled.nextState;
+          });
+        }
+        return;
+      }
+
+      const todayKey = getLocalDateKey();
+      const template = appStateRef.current;
+      let nextState = await loadPersistedState(todayKey, targetUserId, {
+        templateState: template,
+        cloudProfile: options?.cloudProfile,
+      });
+
+      if (seq !== ownerSwitchSeqRef.current) {
+        return;
+      }
+
+      if (deviceNameRef.current) {
+        nextState = updateDeviceDefaultNameState(
+          nextState,
+          deviceNameRef.current
+        );
+      }
+
+      loadedStateOwnerRef.current = targetUserId;
+      appStateRef.current = nextState;
+      setAppState(nextState);
+      if (nextState.cachedUsageSummary) {
+        setUsageSummary(nextState.cachedUsageSummary);
+      }
+      await savePersistedState(nextState, targetUserId);
+    },
+    [hydrated]
+  );
+
+  const refreshCloudNotifications = useCallback(async (uidOverride?: string) => {
+    const uid = uidOverride ?? cloudSessionRef.current?.user?.id;
+    if (!uid || cloudAuthStatusRef.current !== 'authenticated') {
+      return;
+    }
+    const [feed, prefs] = await Promise.all([
+      fetchCloudNotificationsFeed(uid),
+      fetchCloudNotificationPreferences(uid),
+    ]);
+    if (
+      cloudAuthStatusRef.current !== 'authenticated' ||
+      cloudSessionRef.current?.user?.id !== uid
+    ) {
+      return;
+    }
+    if (!feed.error) {
+      setCloudNotifications(feed.notifications);
+      setCloudPendingInvites(feed.pendingInvites);
+    }
+    setCloudNotifPrefs(prefs);
+  }, []);
 
   const updateAndPersist = useCallback(
-    (updater: (prev: PersistedAppState) => PersistedAppState) => {
+    (
+      updater: (prev: PersistedAppState) => PersistedAppState,
+      options?: { syncCloudXp?: boolean }
+    ) => {
+      const storageOwnerId = loadedStateOwnerRef.current;
       setAppState((prev) => {
+        const prevClaimed = prev.claimedXpEvents;
         const next = updater(prev);
-        void savePersistedState(next);
+        void savePersistedState(next, storageOwnerId);
+
+        if (
+          options?.syncCloudXp &&
+          cloudAuthStatusRef.current === 'authenticated' &&
+          cloudSessionRef.current?.user?.id &&
+          storageOwnerId === cloudSessionRef.current.user.id
+        ) {
+          const uid = cloudSessionRef.current.user.id;
+          const profileSnapshot = cloudProfileRef.current;
+          const newEvents = collectNewlyEarnedCloudXpEvents(
+            prevClaimed,
+            next.claimedXpEvents,
+            getLocalDateKey(),
+            getDeviceTimezone()
+          );
+          if (newEvents.length > 0) {
+            queueMicrotask(() => {
+              void enqueueCloudXpEventsForUser(uid, newEvents).then((queue) => {
+                if (
+                  cloudAuthStatusRef.current === 'authenticated' &&
+                  cloudSessionRef.current?.user?.id === uid
+                ) {
+                  setPendingCloudXpCount(queue.length);
+                  void flushPendingCloudXp(uid, profileSnapshot);
+                }
+              });
+            });
+          }
+        }
         return next;
       });
     },
-    []
+    [flushPendingCloudXp]
   );
 
   const refreshNotificationInbox = useCallback(async () => {
@@ -225,7 +468,7 @@ export default function App() {
           todayKey
         );
         return linkedRes.nextState;
-      });
+      }, { syncCloudXp: true });
       if (showFeedbackToast) {
         if (!summary.permissionGranted) {
           setToast('ROT needs Usage Access to estimate your Instagram screen time.');
@@ -245,19 +488,50 @@ export default function App() {
     [updateAndPersist]
   );
 
-  // Hydrate persisted state, query device profile name, and query initial UsageStats
+  // Restore Supabase session FIRST, then hydrate the active owner's isolated local state
   useEffect(() => {
     let mounted = true;
+    const stopAutoRefresh = startSupabaseAutoRefreshLifecycle();
+
     (async () => {
-      const [loaded, deviceInfo, initialNotifStatus, initialInbox] =
+      const [sessionRes, deviceInfo, initialNotifStatus, initialInbox] =
         await Promise.all([
-          loadPersistedState(),
+          restoreCloudSession(),
           queryDeviceProfileInfo(),
           fetchNotificationStatus(),
           fetchNotificationInbox(),
         ]);
       if (!mounted) return;
+
+      deviceNameRef.current = deviceInfo.deviceName ?? null;
+      const bootOwnerId =
+        sessionRes.status === 'authenticated' && sessionRes.session?.user?.id
+          ? sessionRes.session.user.id
+          : null;
+
+      setCloudAuthStatus(sessionRes.status);
+      setCloudSession(sessionRes.session);
+      setCloudProfile(sessionRes.profile);
+      cloudAuthStatusRef.current = sessionRes.status;
+      cloudSessionRef.current = sessionRes.session;
+      cloudProfileRef.current = sessionRes.profile;
+
+      if (sessionRes.status === 'guest' && sessionRes.error) {
+        setAuthError(sessionRes.error);
+      }
+
       const todayKeyOnBoot = getLocalDateKey();
+      const guestTemplate = bootOwnerId
+        ? await loadPersistedState(todayKeyOnBoot, null)
+        : null;
+      if (!mounted) return;
+
+      const loaded = await loadPersistedState(todayKeyOnBoot, bootOwnerId, {
+        templateState: guestTemplate,
+        cloudProfile: sessionRes.profile,
+      });
+      if (!mounted) return;
+
       let hydratedState = updateDeviceDefaultNameState(
         loaded,
         deviceInfo.deviceName
@@ -275,20 +549,37 @@ export default function App() {
           },
         };
       }
+
+      loadedStateOwnerRef.current = bootOwnerId;
+      appStateRef.current = hydratedState;
       setNotificationStatus(initialNotifStatus);
       setNotificationInbox(initialInbox);
       setAppState(hydratedState);
-      if (hydratedState !== loaded) {
-        void savePersistedState(hydratedState);
+      if (hydratedState !== loaded || bootOwnerId !== null) {
+        void savePersistedState(hydratedState, bootOwnerId);
       }
       if (hydratedState.cachedUsageSummary) {
         setUsageSummary(hydratedState.cachedUsageSummary);
       }
       setHydrated(true);
 
+      if (bootOwnerId) {
+        void getPendingCloudXpCount(bootOwnerId).then((count) => {
+          if (mounted && cloudSessionRef.current?.user?.id === bootOwnerId) {
+            setPendingCloudXpCount(count);
+          }
+        });
+        void flushPendingCloudXp(bootOwnerId, sessionRes.profile);
+      } else {
+        setPendingCloudXpCount(0);
+      }
+
       lastAutoRefreshAtRef.current = Date.now();
       const liveSummary = await queryInstagramUsageSummary(7);
       if (!mounted) return;
+      if (liveSummary.deviceName) {
+        deviceNameRef.current = liveSummary.deviceName;
+      }
       setUsageSummary(liveSummary);
       const todayKey = getLocalDateKey();
       updateAndPersist((prev) => {
@@ -332,8 +623,9 @@ export default function App() {
     })();
     return () => {
       mounted = false;
+      stopAutoRefresh();
     };
-  }, [updateAndPersist, refreshNotificationStatus]);
+  }, [updateAndPersist, refreshNotificationStatus, flushPendingCloudXp]);
 
   // Listen for native Android notification deliveries in real time
   useEffect(() => {
@@ -342,6 +634,91 @@ export default function App() {
     });
     return unsubscribe;
   }, [refreshNotificationInbox]);
+
+  // Subscribe to cloud auth state changes and switch isolated local owner state safely
+  useEffect(() => {
+    let active = true;
+
+    const unsubscribeAuth = subscribeToCloudAuthChanges(
+      (_event, session, profile) => {
+        if (!active) return;
+        if (session) {
+          setCloudSession(session);
+          setCloudProfile(profile);
+          setCloudAuthStatus('authenticated');
+          setAuthError(null);
+          cloudAuthStatusRef.current = 'authenticated';
+          cloudSessionRef.current = session;
+          cloudProfileRef.current = profile;
+          void switchActiveOwnerState(session.user.id, {
+            cloudProfile: profile,
+          }).then(() => {
+            if (!active || cloudSessionRef.current?.user?.id !== session.user.id) {
+              return;
+            }
+            void getPendingCloudXpCount(session.user.id).then((count) => {
+              if (active && cloudSessionRef.current?.user?.id === session.user.id) {
+                setPendingCloudXpCount(count);
+              }
+            });
+            void flushPendingCloudXp(session.user.id, profile);
+          });
+        } else {
+          setCloudSession(null);
+          setCloudProfile(null);
+          setPendingCloudXpCount(0);
+          cloudSessionRef.current = null;
+          cloudProfileRef.current = null;
+          setCloudAuthStatus((prev) => {
+            const nextStatus = prev === 'unconfigured' ? 'unconfigured' : 'guest';
+            cloudAuthStatusRef.current = nextStatus;
+            return nextStatus;
+          });
+          if (loadedStateOwnerRef.current !== null) {
+            void switchActiveOwnerState(null);
+          }
+        }
+      }
+    );
+
+    return () => {
+      active = false;
+      unsubscribeAuth();
+    };
+  }, [flushPendingCloudXp, switchActiveOwnerState]);
+
+  // Subscribe to Realtime Cloud Social Notifications while authenticated
+  useEffect(() => {
+    const uid = cloudSession?.user?.id;
+    if (cloudAuthStatus !== 'authenticated' || !uid) {
+      if (cloudAuthStatus !== 'loading') {
+        setCloudNotifications([]);
+        setCloudPendingInvites([]);
+        setHighlightedCloudUnreadIds([]);
+        setCloudNotifPrefs({ ...DEFAULT_CLOUD_NOTIFICATION_PREFS });
+      }
+      return;
+    }
+
+    void refreshCloudNotifications(uid);
+
+    const unsubscribe = subscribeToCloudNotifications(uid, {
+      onInsert: (row) => {
+        setCloudNotifications((prev) => upsertCloudNotificationInList(prev, row));
+        if (row.notification_type === 'squad_invite_received') {
+          void refreshCloudNotifications(uid);
+        }
+        setToast(row.title);
+      },
+      onUpdate: (row) => {
+        setCloudNotifications((prev) => upsertCloudNotificationInList(prev, row));
+      },
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [cloudAuthStatus, cloudSession?.user?.id, refreshCloudNotifications]);
 
   // Re-query UsageStats and Notification status automatically when returning from Android settings
   useEffect(() => {
@@ -354,11 +731,27 @@ export default function App() {
             void syncUsageStats(false);
           }
           void refreshNotificationStatus();
+          if (
+            cloudAuthStatusRef.current === 'authenticated' &&
+            cloudSessionRef.current?.user?.id
+          ) {
+            void flushPendingCloudXp(
+              cloudSessionRef.current.user.id,
+              cloudProfileRef.current
+            );
+            void refreshCloudNotifications(cloudSessionRef.current.user.id);
+          }
         }
       }
     );
     return () => sub.remove();
-  }, [hydrated, syncUsageStats, refreshNotificationStatus]);
+  }, [
+    hydrated,
+    syncUsageStats,
+    refreshNotificationStatus,
+    flushPendingCloudXp,
+    refreshCloudNotifications,
+  ]);
 
   // Toast animation
   const toastOpacity = useRef(new Animated.Value(0)).current;
@@ -514,9 +907,273 @@ export default function App() {
     refreshNotificationStatus,
   ]);
 
-  function handleSaveDisplayName(rawName: string | null) {
+  const syncCloudProfilePatch = useCallback(
+    async (
+      patch: ProfileUpdatePatch,
+      options?: { silent?: boolean; successToast?: string }
+    ) => {
+      const uid = cloudSession?.user?.id;
+      if (cloudAuthStatus !== 'authenticated' || !uid) {
+        return false;
+      }
+      setCloudSyncBusy(true);
+      const res = await updateCloudProfile(uid, patch);
+      setCloudSyncBusy(false);
+
+      if (res.ok && res.profile) {
+        setCloudProfile(res.profile);
+        if (options?.successToast) {
+          setToast(options.successToast);
+        }
+        return true;
+      }
+
+      if (!options?.silent) {
+        setToast(res.error || 'Could not update your Cloud Club profile.');
+      }
+      return false;
+    },
+    [cloudAuthStatus, cloudSession]
+  );
+
+  // Sync device IANA timezone and privacy-respecting status_band while authenticated
+  useEffect(() => {
+    const uid = cloudSession?.user?.id;
+    if (
+      cloudAuthStatus !== 'authenticated' ||
+      !uid ||
+      !cloudProfile ||
+      !hydrated ||
+      profileSyncInFlightRef.current
+    ) {
+      return;
+    }
+
+    const desiredTz = getDeviceTimezone();
+    const desiredBand = deriveCloudStatusBand({
+      shareSquadStatus: cloudProfile.share_squad_status,
+      hasVerifiedEstimate: usageDisplay.hasVerifiedEstimate,
+      usedMinutes: limitProgress.usedMinutes,
+      limitMinutes: effectiveLimitMinutes,
+      isOverLimit: limitProgress.isOverLimit,
+    });
+
+    const patch = buildProfileSyncPatch(cloudProfile, {
+      timezone: desiredTz,
+      statusBand: desiredBand,
+    });
+
+    if (!patch) {
+      lastProfilePatchSigRef.current = null;
+      return;
+    }
+
+    const sig = `${uid}:${JSON.stringify(patch)}`;
+    if (lastProfilePatchSigRef.current === sig) {
+      return;
+    }
+
+    lastProfilePatchSigRef.current = sig;
+    profileSyncInFlightRef.current = true;
+    void updateCloudProfile(uid, patch)
+      .then((res) => {
+        if (res.ok && res.profile) {
+          setCloudProfile(res.profile);
+        }
+      })
+      .finally(() => {
+        profileSyncInFlightRef.current = false;
+      });
+  }, [
+    cloudAuthStatus,
+    cloudSession,
+    cloudProfile,
+    hydrated,
+    usageDisplay.hasVerifiedEstimate,
+    limitProgress.usedMinutes,
+    limitProgress.isOverLimit,
+    effectiveLimitMinutes,
+  ]);
+
+  async function handleSignInWithGoogle() {
+    if (authBusy) return;
+    setAuthBusy(true);
+    setAuthError(null);
+    const result = await signInWithGoogle();
+
+    if (result.ok) {
+      lastProfilePatchSigRef.current = null;
+      setCloudSession(result.session);
+      setCloudProfile(result.profile);
+      setCloudAuthStatus('authenticated');
+      cloudAuthStatusRef.current = 'authenticated';
+      cloudSessionRef.current = result.session;
+      cloudProfileRef.current = result.profile;
+      await switchActiveOwnerState(result.session.user.id, {
+        cloudProfile: result.profile,
+      });
+      const pendingCount = await getPendingCloudXpCount(result.session.user.id);
+      if (cloudSessionRef.current?.user?.id === result.session.user.id) {
+        setPendingCloudXpCount(pendingCount);
+        void flushPendingCloudXp(result.session.user.id, result.profile);
+      }
+      setAuthBusy(false);
+      const resolved = resolveCloudAccountIdentity(
+        result.session.user,
+        result.profile
+      );
+      setToast(formatSignInSuccessToast(resolved));
+      return;
+    }
+
+    setAuthBusy(false);
+    if (result.error.cancelled) {
+      setToast(result.error.userMessage);
+      return;
+    }
+
+    setAuthError(result.error.userMessage);
+    setToast(result.error.userMessage);
+  }
+
+  async function handleSignOutCloud() {
+    if (authBusy) return;
+    setAuthBusy(true);
+    const result = await signOutFromCloud();
+
+    if (result.ok) {
+      lastProfilePatchSigRef.current = null;
+      cloudAuthStatusRef.current = 'guest';
+      cloudSessionRef.current = null;
+      cloudProfileRef.current = null;
+      setCloudSession(null);
+      setCloudProfile(null);
+      setPendingCloudXpCount(0);
+      setCloudAuthStatus('guest');
+      setAuthError(null);
+      await switchActiveOwnerState(null);
+      setAuthBusy(false);
+      setToast('Signed out of cloud account. Local guest progress is preserved.');
+    } else {
+      setAuthBusy(false);
+      const msg = result.error || 'Could not sign out right now.';
+      setAuthError(msg);
+      setToast(msg);
+    }
+  }
+
+  function handleToggleShareSquadStatus() {
+    if (!cloudProfile) return;
+    const nextShare = !cloudProfile.share_squad_status;
+    const nextBand = deriveCloudStatusBand({
+      shareSquadStatus: nextShare,
+      hasVerifiedEstimate: usageDisplay.hasVerifiedEstimate,
+      usedMinutes: limitProgress.usedMinutes,
+      limitMinutes: effectiveLimitMinutes,
+      isOverLimit: limitProgress.isOverLimit,
+    });
+    void syncCloudProfilePatch(
+      {
+        share_squad_status: nextShare,
+        status_band: nextBand,
+      },
+      {
+        successToast: nextShare
+          ? 'Squad target band sharing enabled (never shares exact minutes).'
+          : 'Squad target band hidden from other members.',
+      }
+    );
+  }
+
+  function handleSyncLocalNameToCloud() {
+    void syncCloudProfilePatch(
+      { display_name: identity.displayName },
+      {
+        successToast: `Cloud Squad display name updated to ${identity.displayName}.`,
+      }
+    );
+  }
+
+  async function handleToggleCloudNotifPref(
+    key: 'squad_invites_enabled' | 'squad_activity_enabled'
+  ) {
+    const uid = cloudSession?.user?.id;
+    if (cloudAuthStatus !== 'authenticated' || !uid) return;
+    const nextValue = !cloudNotifPrefs[key];
+    const prevPrefs = cloudNotifPrefs;
+    setCloudNotifPrefs((prev) => ({ ...prev, [key]: nextValue }));
+    setCloudSyncBusy(true);
+    const res = await updateCloudNotificationPreferences(uid, {
+      [key]: nextValue,
+    });
+    setCloudSyncBusy(false);
+    if (res.ok) {
+      setCloudNotifPrefs(res.prefs);
+      setToast('Cloud notification preference saved.');
+    } else {
+      setCloudNotifPrefs(prevPrefs);
+      setToast(res.error || 'Could not update cloud notification preference.');
+    }
+  }
+
+  async function handleAcceptSquadInviteFromNotif(inviteCode: string) {
+    if (inviteActionBusy) return;
+    setInviteActionBusy(true);
+    const res = await acceptCloudSquadInvitation(inviteCode);
+    setInviteActionBusy(false);
+    if (res.ok) {
+      setToast(`Joined ${res.data.squad_name}!`);
+      setNotificationCenterOpen(false);
+      setActiveView('Leaderboard');
+      if (cloudSessionRef.current?.user?.id) {
+        void refreshCloudNotifications(cloudSessionRef.current.user.id);
+      }
+    } else {
+      setToast(res.error);
+    }
+  }
+
+  async function handleDeclineSquadInviteFromNotif(invitationId: string) {
+    if (inviteActionBusy) return;
+    setInviteActionBusy(true);
+    const res = await declineCloudSquadInvitation(invitationId);
+    setInviteActionBusy(false);
+    if (res.ok) {
+      setCloudPendingInvites((prev) =>
+        prev.filter((inv) => inv.id !== invitationId)
+      );
+      setToast('Squad invitation declined.');
+      if (cloudSessionRef.current?.user?.id) {
+        void refreshCloudNotifications(cloudSessionRef.current.user.id);
+      }
+    } else {
+      setToast(res.error);
+    }
+  }
+
+  function handleSaveDisplayName(
+    rawName: string | null,
+    alsoSyncToCloud = false
+  ) {
     const res = updateCustomDisplayNameState(appStateRef.current, rawName);
     updateAndPersist(() => res.nextState);
+
+    if (
+      alsoSyncToCloud &&
+      cloudAuthStatus === 'authenticated' &&
+      cloudSession?.user?.id
+    ) {
+      void syncCloudProfilePatch(
+        { display_name: res.resolvedName },
+        {
+          successToast: res.revertedToDefault
+            ? `Display name reset to ${res.resolvedName} (synced to Cloud).`
+            : `Display name saved & synced to Cloud as ${res.resolvedName}.`,
+        }
+      );
+      return;
+    }
+
     if (res.revertedToDefault) {
       setToast(`Display name reset to ${res.resolvedName}.`);
     } else {
@@ -533,7 +1190,7 @@ export default function App() {
       usageDisplay,
       effectiveLimitMinutes
     );
-    updateAndPersist(() => result.nextState);
+    updateAndPersist(() => result.nextState, { syncCloudXp: true });
     if (result.celebration) {
       setCelebration(result.celebration);
     }
@@ -544,7 +1201,7 @@ export default function App() {
 
   function handleClaimWeeklyQuest(questId: WeeklyQuestId) {
     const result = claimWeeklyQuestState(appStateRef.current, questId, dateKey);
-    updateAndPersist(() => result.nextState);
+    updateAndPersist(() => result.nextState, { syncCloudXp: true });
     if (result.celebration) {
       setCelebration(result.celebration);
     }
@@ -555,7 +1212,7 @@ export default function App() {
 
   function handleRecoverStreak() {
     const result = recoverStreakState(appStateRef.current, dateKey);
-    updateAndPersist(() => result.nextState);
+    updateAndPersist(() => result.nextState, { syncCloudXp: true });
     if (result.celebration) {
       setCelebration(result.celebration);
     }
@@ -566,7 +1223,7 @@ export default function App() {
 
   function handleLogMood(moodId: MoodId, note: string) {
     const result = logDailyMoodState(appStateRef.current, moodId, note, dateKey);
-    updateAndPersist(() => result.nextState);
+    updateAndPersist(() => result.nextState, { syncCloudXp: true });
     if (result.celebration) {
       setCelebration(result.celebration);
     }
@@ -577,7 +1234,7 @@ export default function App() {
 
   function handleClaimDailyChest() {
     const result = claimDailyChestState(appStateRef.current);
-    updateAndPersist(() => result.nextState);
+    updateAndPersist(() => result.nextState, { syncCloudXp: true });
     if (result.celebration) {
       setCelebration(result.celebration);
     }
@@ -597,7 +1254,7 @@ export default function App() {
       dateKey,
       durationMinutes
     );
-    updateAndPersist(() => result.nextState);
+    updateAndPersist(() => result.nextState, { syncCloudXp: true });
     if (result.celebration) {
       setCelebration(result.celebration);
     }
@@ -706,7 +1363,7 @@ export default function App() {
         dateKey
       ).nextState;
       return next;
-    });
+    }, { syncCloudXp: true });
     setToast(
       `Daily limit updated to ${formatMinutesAsHoursAndMinutes(clamped).compact}.`
     );
@@ -742,7 +1399,20 @@ export default function App() {
   }
 
   function handleClearLocalHistory() {
-    updateAndPersist((prev) => clearLocalHistoryState(prev, dateKey));
+    updateAndPersist((prev) => {
+      const cleared = clearLocalHistoryState(prev, dateKey);
+      if (loadedStateOwnerRef.current !== null) {
+        const cloudReset: PersistedAppState = {
+          ...cleared,
+          baseXp: 0,
+        };
+        return reconcileCloudUserXpWithProfile(
+          cloudReset,
+          cloudProfileRef.current
+        ).nextState;
+      }
+      return cleared;
+    });
     void clearNativeNotificationHistory().then((emptyInbox) => {
       setNotificationInbox(emptyInbox);
     });
@@ -814,6 +1484,9 @@ export default function App() {
   }
 
   const exportPreviewResult = serializeUserDataExportJson(appState);
+  const cloudIdentity = cloudSession?.user
+    ? resolveCloudAccountIdentity(cloudSession.user, cloudProfile)
+    : null;
 
   function renderScreen() {
     switch (activeView) {
@@ -846,6 +1519,17 @@ export default function App() {
             todayMoodLog={todayMoodLog}
             recentMoodLogs={recentMoodLogs}
             onLogMood={handleLogMood}
+            cloudAuthStatus={cloudAuthStatus}
+            cloudIdentity={cloudIdentity}
+            authBusy={authBusy}
+            authError={authError}
+            showSignInPrompt={
+              !authBannerDismissed &&
+              cloudAuthStatus !== 'authenticated' &&
+              cloudAuthStatus !== 'loading'
+            }
+            onSignInWithGoogle={() => void handleSignInWithGoogle()}
+            onDismissSignInPrompt={() => setAuthBannerDismissed(true)}
           />
         );
       case 'Missions':
@@ -877,6 +1561,10 @@ export default function App() {
             userInitials={identity.initials}
             totalXp={totalXp}
             earnedTodayXp={earnedTodayXp}
+            cloudAuthStatus={cloudAuthStatus}
+            cloudIdentity={cloudIdentity}
+            authBusy={authBusy}
+            onSignInWithGoogle={() => void handleSignInWithGoogle()}
             onToast={setToast}
           />
         );
@@ -962,6 +1650,24 @@ export default function App() {
             onExportUserData={() => void handleExportUserData()}
             exportJsonPreview={exportPreviewResult.json}
             onSendTestNotification={() => void handleSendTestNotification()}
+            cloudAuthStatus={cloudAuthStatus}
+            cloudIdentity={cloudIdentity}
+            cloudProfile={cloudProfile}
+            cloudSyncBusy={cloudSyncBusy}
+            pendingCloudXpCount={pendingCloudXpCount}
+            cloudNotifPrefs={cloudNotifPrefs}
+            authBusy={authBusy}
+            authError={authError}
+            onSignInWithGoogle={() => void handleSignInWithGoogle()}
+            onSignOutCloud={() => void handleSignOutCloud()}
+            onToggleShareSquadStatus={handleToggleShareSquadStatus}
+            onToggleCloudNotifPref={(key) => void handleToggleCloudNotifPref(key)}
+            onSyncLocalNameToCloud={handleSyncLocalNameToCloud}
+            onFlushCloudXp={() => {
+              void flushPendingCloudXp().then(() => {
+                setToast('Cloud XP sync checked.');
+              });
+            }}
           />
         );
     }
@@ -971,11 +1677,21 @@ export default function App() {
     const unreadIds = notificationInbox.items
       .filter((item) => !item.read)
       .map((item) => item.id);
+    const unreadCloudIds = cloudNotifications
+      .filter((item) => !item.is_read)
+      .map((item) => item.id);
     setHighlightedUnreadIds(unreadIds);
+    setHighlightedCloudUnreadIds(unreadCloudIds);
     setNotificationCenterOpen(true);
     void markAllNativeNotificationsRead().then((updatedInbox) => {
       setNotificationInbox(updatedInbox);
     });
+    if (cloudAuthStatus === 'authenticated' && unreadCloudIds.length > 0) {
+      setCloudNotifications((prev) =>
+        markCloudNotificationsLocallyRead(prev, unreadCloudIds)
+      );
+      void markCloudNotificationsReadOnServer(unreadCloudIds);
+    }
   }
 
   function handleOpenXpLedger() {
@@ -983,7 +1699,12 @@ export default function App() {
     setScrollToLedgerRequestId((id) => id + 1);
   }
 
-  const unreadBadgeText = formatUnreadBadgeCount(notificationInbox.unreadCount);
+  const unreadBadgeText = formatUnreadBadgeCount(
+    computeCombinedUnreadNotificationCount(
+      notificationInbox.unreadCount,
+      cloudNotifications
+    )
+  );
 
   return (
     <SafeAreaProvider>
@@ -1107,6 +1828,17 @@ export default function App() {
           items={notificationInbox.items}
           highlightedUnreadIds={highlightedUnreadIds}
           notificationStatus={notificationStatus}
+          cloudAuthStatus={cloudAuthStatus}
+          cloudNotifications={cloudNotifications}
+          highlightedCloudUnreadIds={highlightedCloudUnreadIds}
+          pendingInvitesById={buildPendingInviteMap(cloudPendingInvites)}
+          inviteActionBusy={inviteActionBusy}
+          onAcceptSquadInvite={(code) =>
+            void handleAcceptSquadInviteFromNotif(code)
+          }
+          onDeclineSquadInvite={(id) =>
+            void handleDeclineSquadInviteFromNotif(id)
+          }
           onClearAll={() => {
             void clearNativeNotificationHistory().then((emptyInbox) => {
               setNotificationInbox(emptyInbox);

@@ -12,6 +12,12 @@ import {
   NotificationInboxItem,
   NotificationStatusSnapshot,
 } from '../constants/types';
+import {
+  SocialNotificationRow,
+  SquadInvitationRow,
+} from '../types/database.types';
+import { CloudAuthStatus } from '../utils/authHelpers';
+import { formatCloudNotificationCategoryLabel } from '../utils/cloudNotificationsCore';
 import { getLocalDateKey } from '../utils/domainLogic';
 import Icon from './Icon';
 
@@ -20,10 +26,29 @@ type Props = {
   items: NotificationInboxItem[];
   highlightedUnreadIds: string[];
   notificationStatus: NotificationStatusSnapshot;
+  cloudAuthStatus: CloudAuthStatus;
+  cloudNotifications: SocialNotificationRow[];
+  highlightedCloudUnreadIds: string[];
+  pendingInvitesById: Record<string, SquadInvitationRow>;
+  inviteActionBusy?: boolean;
+  onAcceptSquadInvite: (inviteCode: string) => void;
+  onDeclineSquadInvite: (invitationId: string) => void;
   onClearAll: () => void;
   onOpenSettings: () => void;
   onClose: () => void;
 };
+
+function formatCloudIsoTime(iso: string): string {
+  const dateObj = new Date(iso);
+  if (Number.isNaN(dateObj.getTime())) return 'Recent';
+  const todayKey = getLocalDateKey();
+  const isoDay = dateObj.toISOString().slice(0, 10);
+  const timeText = dateObj.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  return isoDay === todayKey ? `Today · ${timeText}` : `${isoDay} · ${timeText}`;
+}
 
 function formatNotificationTime(item: NotificationInboxItem): string {
   const todayKey = getLocalDateKey();
@@ -47,12 +72,21 @@ export default function NotificationCenterModal({
   items,
   highlightedUnreadIds,
   notificationStatus,
+  cloudAuthStatus,
+  cloudNotifications,
+  highlightedCloudUnreadIds,
+  pendingInvitesById,
+  inviteActionBusy = false,
+  onAcceptSquadInvite,
+  onDeclineSquadInvite,
   onClearAll,
   onOpenSettings,
   onClose,
 }: Props) {
   const highlightedSet = new Set(highlightedUnreadIds);
+  const highlightedCloudSet = new Set(highlightedCloudUnreadIds);
   const hasPermissionIssue = notificationStatus.statusCode !== 'allowed';
+  const totalItemsCount = items.length + cloudNotifications.length;
 
   return (
     <Modal
@@ -111,14 +145,14 @@ export default function NotificationCenterModal({
             </View>
           )}
 
-          {items.length === 0 ? (
+          {totalItemsCount === 0 ? (
             <View style={styles.emptyBox}>
               <View style={styles.emptyIconWrap}>
                 <Icon name="bell" size={22} color={COLORS.purple} />
               </View>
               <Text style={styles.emptyTitle}>All caught up</Text>
               <Text style={styles.emptySub}>
-                Gentle scroll nudges, daily reminders, and achievement alerts delivered to this device will appear here.
+                Gentle scroll nudges, daily reminders, and Cloud Squad updates will appear here.
               </Text>
             </View>
           ) : (
@@ -127,36 +161,105 @@ export default function NotificationCenterModal({
               contentContainerStyle={styles.listContent}
               showsVerticalScrollIndicator={false}
             >
-              {items.map((item) => {
-                const isJustRead = highlightedSet.has(item.id);
-                return (
-                  <View
-                    key={item.id}
-                    style={[
-                      styles.itemCard,
-                      isJustRead && styles.itemCardUnread,
-                    ]}
-                  >
-                    <View style={styles.itemMetaRow}>
-                      <View style={styles.categoryChip}>
-                        <Text style={styles.categoryChipText}>
-                          {getCategoryLabel(item)}
-                        </Text>
-                      </View>
-                      {isJustRead && (
-                        <View style={styles.newChip}>
-                          <Text style={styles.newChipText}>NEW</Text>
+              {cloudAuthStatus === 'authenticated' && cloudNotifications.length > 0 ? (
+                <>
+                  <Text style={styles.groupEyebrow}>ROT CLUB · CLOUD UPDATES</Text>
+                  {cloudNotifications.map((cn) => {
+                    const isJustRead = highlightedCloudSet.has(cn.id);
+                    const pendingInv =
+                      cn.notification_type === 'squad_invite_received' &&
+                      cn.related_entity_id
+                        ? pendingInvitesById[cn.related_entity_id]
+                        : undefined;
+                    return (
+                      <View
+                        key={`cloud-${cn.id}`}
+                        style={[
+                          styles.itemCard,
+                          styles.cloudItemCard,
+                          isJustRead && styles.itemCardUnread,
+                        ]}
+                      >
+                        <View style={styles.itemMetaRow}>
+                          <View style={styles.cloudCategoryChip}>
+                            <Text style={styles.cloudCategoryChipText}>
+                              {formatCloudNotificationCategoryLabel(cn.notification_type)}
+                            </Text>
+                          </View>
+                          {isJustRead && (
+                            <View style={styles.newChip}>
+                              <Text style={styles.newChipText}>NEW</Text>
+                            </View>
+                          )}
+                          <Text style={styles.timeText}>
+                            {formatCloudIsoTime(cn.created_at)}
+                          </Text>
                         </View>
-                      )}
-                      <Text style={styles.timeText}>
-                        {formatNotificationTime(item)}
-                      </Text>
-                    </View>
-                    <Text style={styles.itemTitle}>{item.title}</Text>
-                    <Text style={styles.itemBody}>{item.body}</Text>
-                  </View>
-                );
-              })}
+                        <Text style={styles.itemTitle}>{cn.title}</Text>
+                        <Text style={styles.itemBody}>{cn.body}</Text>
+                        {pendingInv ? (
+                          <View style={styles.inviteActionRow}>
+                            <TouchableOpacity
+                              style={styles.acceptBtn}
+                              onPress={() => onAcceptSquadInvite(pendingInv.invite_code)}
+                              disabled={inviteActionBusy}
+                            >
+                              <Text style={styles.acceptBtnText}>Accept invite</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              style={styles.declineBtn}
+                              onPress={() => onDeclineSquadInvite(pendingInv.id)}
+                              disabled={inviteActionBusy}
+                            >
+                              <Text style={styles.declineBtnText}>Decline</Text>
+                            </TouchableOpacity>
+                          </View>
+                        ) : null}
+                      </View>
+                    );
+                  })}
+                </>
+              ) : null}
+
+              {items.length > 0 ? (
+                <>
+                  {cloudAuthStatus === 'authenticated' && cloudNotifications.length > 0 ? (
+                    <Text style={[styles.groupEyebrow, { marginTop: 4 }]}>
+                      THIS DEVICE · LOCAL REMINDERS
+                    </Text>
+                  ) : null}
+                  {items.map((item) => {
+                    const isJustRead = highlightedSet.has(item.id);
+                    return (
+                      <View
+                        key={item.id}
+                        style={[
+                          styles.itemCard,
+                          isJustRead && styles.itemCardUnread,
+                        ]}
+                      >
+                        <View style={styles.itemMetaRow}>
+                          <View style={styles.categoryChip}>
+                            <Text style={styles.categoryChipText}>
+                              {getCategoryLabel(item)}
+                            </Text>
+                          </View>
+                          {isJustRead && (
+                            <View style={styles.newChip}>
+                              <Text style={styles.newChipText}>NEW</Text>
+                            </View>
+                          )}
+                          <Text style={styles.timeText}>
+                            {formatNotificationTime(item)}
+                          </Text>
+                        </View>
+                        <Text style={styles.itemTitle}>{item.title}</Text>
+                        <Text style={styles.itemBody}>{item.body}</Text>
+                      </View>
+                    );
+                  })}
+                </>
+              ) : null}
             </ScrollView>
           )}
         </View>
@@ -343,5 +446,54 @@ const styles = StyleSheet.create({
     color: COLORS.muted,
     lineHeight: 17,
     marginTop: 3,
+  },
+  groupEyebrow: {
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.7,
+    color: COLORS.purple,
+  },
+  cloudItemCard: {
+    borderColor: '#dfd3eb',
+    backgroundColor: '#fcfaff',
+  },
+  cloudCategoryChip: {
+    paddingVertical: 3,
+    paddingHorizontal: 7,
+    borderRadius: 6,
+    backgroundColor: '#e4f8ee',
+  },
+  cloudCategoryChipText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#1e7e4e',
+    letterSpacing: 0.5,
+  },
+  inviteActionRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 10,
+  },
+  acceptBtn: {
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: COLORS.purple,
+  },
+  acceptBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: COLORS.white,
+  },
+  declineBtn: {
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: '#ffe8f2',
+  },
+  declineBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: COLORS.pink,
   },
 });

@@ -1,12 +1,12 @@
-# ROT. — The Brainrot Club (Android MVP)
+# ROT. — The Brainrot Club (Android MVP + Cloud Squads)
 
-ROT. is a local-first, privacy-respecting Android digital wellbeing companion that helps users build healthier Instagram scrolling habits through honest `UsageStats` foreground-time estimates, daily targets, streaks, focus breaks, notifications, and shareable collector cards—without shame, dark patterns, or Instagram login.
+ROT. is a local-first, privacy-respecting Android digital wellbeing companion that helps users build healthier Instagram scrolling habits through honest `UsageStats` foreground-time estimates, daily targets, streaks, focus breaks, notifications, shareable collector cards, and optional Google/Supabase-backed Cloud Squads—without shame, dark patterns, or Instagram login.
 
-Full Phase 1 historical milestones, Phase 2 MVP architecture, physical-device QA results, and the complete SRS cross-check matrix (`FR-001`–`FR-031`, `NFR-01`–`NFR-18`, `BT-01`–`BT-15`, `AT-01`–`AT-12`) are documented in [docs/EXECUTIVE_DEMO_REPORT.md](docs/EXECUTIVE_DEMO_REPORT.md).
+Full Phase 1–2 historical milestones, Stage 3–4 cloud architecture, physical-device QA results, and the SRS cross-check matrix (`FR-001`–`FR-031`, `NFR-01`–`NFR-18`, `BT-01`–`BT-15`, `AT-01`–`AT-12`) are documented in [docs/EXECUTIVE_DEMO_REPORT.md](docs/EXECUTIVE_DEMO_REPORT.md).
 
 ---
 
-## Current MVP Scope (`feature/rot-mvp-core` — `PR #2` & `PR #2.1`)
+## Current Scope (`fix/rot-cloud-account-isolation` on `master`)
 
 1. **Android Development Build & Native Bridge (`android/`):** Native Android project (`com.rot.brainrotclub`) configured for **Expo `~58.0.24`**, **React Native `0.88.1`**, **React `19.3.0`**, **TypeScript `~6.0.3`**, and **WorkManager `2.10.0`** with New Architecture and Hermes enabled.
 2. **Local-First Profile & Device Identity:** Automatically resolves the Android device name (`Settings.Global.DEVICE_NAME`, `bluetooth_name`, or `Build.MODEL`) on first launch, allows custom display-name editing from Today or Settings (max 28 characters), persists locally in `AsyncStorage`, and reverts cleanly to the device default or `"ROT User"` fallback.
@@ -20,16 +20,21 @@ Full Phase 1 historical milestones, Phase 2 MVP architecture, physical-device QA
 6. **Streak & Grace-Day Engine, Usage-Linked Missions & Weekly Quests:**
    - Daily streak evaluator with 1 weekly automatic **Grace Day**, non-punitive missing-data handling, and streak recovery (`+25 XP`).
    - 4 daily missions (including auto-verified `stay-under-target`) and 3 auto-tracked Weekly Quests (`Balanced Week`, `Focus Break Master`, `Target Guardian`).
-7. **Idempotent XP, Brain Bank Ledger, Levels, Focus Breaks, Badges & Local Leaderboard:**
+7. **Idempotent XP, Brain Bank Ledger, Levels, Focus Breaks & Badges:**
    - Deterministic event keys (`claimedXpEvents`) backed by a verified **Brain Bank XP Ledger** (`Verified · <N> XP`), interactive top-bar XP pill shortcut, player levels, `1m` / `5m` / `10m` Focus Break timer (`expo-audio` WAV jingles), Daily Reward Chest, and 6 unlockable badges.
-   - Local-only **Leaderboard** preview (`Friends`, `Squad`, `Campus` tabs in `data.ts`) merging your live identity and XP with static demo club entries (no backend multiplayer).
-8. **Native Notifications, Persistent Unread Badge & Background Scheduling:**
-   - Real Android notification channels (`rot_wellbeing_nudges`, `rot_scheduled_reminders`), `WorkManager` 15-minute periodic budget checks (`RotUsageCheckWorker.kt`), `AlarmManager` daily reminders (`RotNotificationScheduler.kt`), configurable quiet hours, and `RotBootReceiver` for boot/time-change rescheduling.
-   - Native `SharedPreferences` inbox (`RotNotificationPrefs.kt`) powers the in-app **Notification Center** (`NotificationCenterModal.tsx`) and persistent top-bar bell badge (`0` hidden, `99+` cap).
-9. **Dual Shareable Cards, Private Mode & Android Gallery / Share Sheet (`RotCardMediaModule.kt`):**
-   - Swipeable **Archetype Collector Card** and **Weekly Achievement Card** with a modal export hub (`CardSelectionModal.tsx`) that freezes background gestures while open.
-   - Generates `1080x1350` (Feed `4:5`) and `1080x1920` (Story `9:16`) PNGs via `react-native-view-shot`, supports Private Mode stats redaction, saves to `Pictures/ROT` via `MediaStore` with duplicate prevention, and launches the native Android Share Sheet via `FileProvider`.
-10. **Privacy Controls & Data Portability:** One-tap tracking pause, structured JSON export (`rot-user-data-export-v1`) with inline preview, and two-tap `Clear local history` in Settings.
+8. **Optional Google Auth, Cloud XP Sync & Invite-Only Squads (Stage 3–4 + Isolation Fix):**
+   - **Authentication & Session Storage:** Native Android Google Sign-In (`@react-native-google-signin/google-signin`) exchanges an ID token with Supabase Auth (`signInWithIdToken`) and stores sessions in chunked `expo-secure-store` (`src/utils/secureStorageCore.ts`).
+   - **Cloud Profile & Scoped XP Queue:** Authenticated users get server-persisted `profiles` (`cloud_xp`, timezone-normalized sync, optional display-name sync, and `BT-08` status-band privacy) plus a per-user offline-capable XP queue flushed via the `award_cloud_xp` RPC without ever transferring historical Guest XP.
+   - **Cloud Squads vs. Local Demo Preview:** The **Squad** tab is cloud-powered for authenticated users (squad creation, invite code generation/redemption, **targeted invitations by Member ID**, ownership transfer, block/unblock, abuse reporting, and Realtime-backed squad notifications), while **Friends** and **Campus** tabs remain clearly labeled **Local Demo Preview** entries.
+9. **Account Isolation & Cold-Start Sign-Out Hardening (`fix/rot-cloud-account-isolation`):**
+   - **Guest XP Isolation (`@rot_executive_demo_state_v1`):** Guest progress, `baseXp`, `claimedXpEvents`, `xpLedger`, and custom display name remain strictly isolated in `GUEST_STORAGE_KEY`.
+   - **Per-User Cloud State (`@rot_cloud_user_state_v1_<userId>`):** Each signed-in account uses its own user-scoped `AsyncStorage` key (`CLOUD_USER_STATE_KEY_PREFIX` in `src/utils/accountStorageCore.ts`), starting with `baseXp: 0` and preserving only device-level permissions/settings (`consentStatus`, `trackingEnabled`, `dailyLimitMinutes`, `settings`, `cachedUsageSummary`).
+   - **Cloud XP Reconciliation & Safe Switching:** `reconcileCloudUserXpWithProfile` monotonically aligns local cloud XP with `profiles.cloud_xp` without inflating server XP or altering Guest XP, while `switchActiveOwnerState` and `loadedStateOwnerRef` guards prevent stale async writes across account switches.
+   - **Google Sign-Out Cold-Start Fix:** `signOutFromCloud()` (`src/utils/auth.ts` / `src/utils/authHelpers.ts`) invokes `ensureGoogleSignInConfigured()` before `GoogleSignin.signOut()` so cold-restored sessions still clear native Google account selection, and falls back to `supabase.auth.signOut({ scope: 'local' })` if remote revocation fails.
+   - **Targeted Squad Invitations by Member ID:** Squad owners can send targeted invitations using an invitee's UUID Member ID (`validateInviteeUserId` in `src/utils/cloudSquadsCore.ts`, `SEND TARGETED INVITATION BY MEMBER ID` in `LeaderboardScreen.tsx`), and signed-in users can view/select their `Member ID` in **Settings**.
+10. **Native Notifications, Persistent Unread Badge, Shareable Cards & Privacy Controls:**
+    - Real Android notification channels, `WorkManager` 15-minute periodic checks, `AlarmManager` daily reminders, quiet hours, `RotBootReceiver`, and persistent unread inbox merged with cloud notifications in `NotificationCenterModal.tsx`.
+    - Swipeable **Archetype Collector Card** and **Weekly Achievement Card** (`1080x1350` Feed / `1080x1920` Story PNGs) with Private Mode stats redaction, `MediaStore` deduplication, Android Share Sheet, JSON export (`rot-user-data-export-v1`), and two-tap `Clear local history`.
 
 ---
 
@@ -41,18 +46,34 @@ Full Phase 1 historical milestones, Phase 2 MVP architecture, physical-device QA
 | **JDK** | JDK 17 (`JAVA_HOME` configured) |
 | **Android Build** | `newArchEnabled=true`, `hermesEnabled=true`, `reactNativeArchitectures=arm64-v8a`, `androidx.work:work-runtime-ktx:2.10.0` |
 | **Expo / React Native** | `expo@~58.0.24`, `react-native@0.88.1`, `react@19.3.0`, `typescript@~6.0.3` |
+| **Cloud SDKs (Optional Cloud Mode)** | `@supabase/supabase-js@^2.81.1`, `@react-native-google-signin/google-signin@^16.0.0`, `expo-secure-store@~58.0.8` |
 | **Target Device** | Physical Android device or emulator (verified on **Xiaomi Redmi 11 Prime**, Android 14 / API 34) |
 
 ---
 
-## 2. Local Setup
+## 2. Local & Cloud Setup
 
-Clone the repository, check out `feature/rot-mvp-core`, and install dependencies:
+Clone the repository, check out your working branch, and install dependencies:
 
 ```bash
-git checkout feature/rot-mvp-core
+git checkout fix/rot-cloud-account-isolation
 npm install
 ```
+
+### Optional Cloud Configuration (`.env`)
+
+To enable Google Sign-In and Supabase cloud features locally, copy `.env.example` to `.env` and populate your own public client values:
+
+```bash
+cp .env.example .env
+```
+
+Required variables in `.env` (never commit `.env`, access tokens, or `service_role` / `client_secret` credentials):
+- `EXPO_PUBLIC_SUPABASE_URL` — Supabase project URL.
+- `EXPO_PUBLIC_SUPABASE_ANON_KEY` — Supabase public anonymous/publishable key (never a `service_role` key; `src/utils/authHelpers.ts` actively rejects secret keys).
+- `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID` — Google Cloud OAuth 2.0 Web Client ID paired with the Android OAuth client package name (`com.rot.brainrotclub`) and signing SHA-1 fingerprint.
+
+Database schema migrations (`supabase/migrations/20261118000001`–`20261118000004`) and SQL security tests (`supabase/tests/database_security_test.sql`) live under `supabase/`.
 
 ---
 
@@ -122,13 +143,51 @@ npm run lint
 npm test
 ```
 
-Latest verified suite: `tsc --noEmit` (`0` errors), `npm run lint` (`27` files), `npm test` (`15` passed, `0` failed), and `:app:assembleDebug` (`BUILD SUCCESSFUL`).
+Latest verified suite: `tsc --noEmit` (`0` errors), `npm run lint` (`44` files), `npm test` (`31` passed, `0` failed), and `:app:assembleDebug` (`BUILD SUCCESSFUL`).
 
 ---
 
-## 8. Known Limitations & Unverified Scenarios
+## 8. Stage 4 / Cloud Integration Verification
+
+The tables below distinguish **automated tests**, **device-tested behavior** on a Xiaomi Redmi 11 Prime (two distinct Google/Supabase accounts labeled **Account A** and **Account B**, with sensitive emails, UUIDs, and invite codes redacted), and **explicitly untested behavior**.
+
+### Automated Tests (`31 passed, 0 failed`)
+- **Storage, Auth & Account Isolation (`src/utils/__tests__/authAndStorage.test.ts`):**
+  - Chunked UTF-8 `SecureStore` session serialization and env validation rejecting `service_role`/secret keys.
+  - Simulated Google Sign-In + Supabase `signInWithIdToken`, session restoration across restarts, and cold-start `ensureGoogleSignInConfigured()` execution during `performSignOut`.
+  - Regression test verifying Guest XP (`629 XP`) isolation across `Guest -> Account A -> Guest -> Account B -> Account A` transitions using separate `@rot_executive_demo_state_v1` and `@rot_cloud_user_state_v1_<userId>` keys without double-counting reconciled `cloud_xp`.
+- **Cloud Stage 4 Core (`src/utils/__tests__/cloudStage4.test.ts`):**
+  - Timezone normalization + UTC fallback, `BT-08` `status_band` privacy masking, profile sync patches, per-user XP queue isolation + offline retry/cap handling, squad name/invite code/Member ID UUID (`validateInviteeUserId`) validation, roster sorting, and notification inbox merge/read tracking.
+- **Core Local MVP (`src/utils/__tests__/domainLogic.test.ts`):**
+  - 9-state `UsageQueryResult`, daily limits, XP ledger idempotency, focus breaks, streak & grace-day engine, weekly quests, mood logs, Brainrot Index, quiet hours, dual card summaries, and `99+` unread badge saturation.
+
+### Device-Tested Behavior (Xiaomi Redmi 11 Prime, Android 14)
+- **Account A Cloud XP:** Confirmed at `145` Cloud XP and independently persisted across sessions.
+- **Account B Cloud XP:** Started at `0` Cloud XP and independently progressed to `50` Cloud XP.
+- **Guest Mode Isolation:** Guest retained `629` XP and custom display name `Pramit` across repeated Account A and Account B sign-in/sign-out cycles.
+- **User-Scoped Storage Keys:** Confirmed Account A and Account B each persisted to separate `@rot_cloud_user_state_v1_<userId>` entries while Guest used `@rot_executive_demo_state_v1`.
+- **Squad Join & Shared Roster:** Account B successfully joined **Balance Club** using a generated invite code; both Account A and Account B observed the accurate two-member roster (`145` XP and `50` XP).
+- **Invite-Accepted Notification:** Account A received the persistent invite-accepted notification for Account B joining **Balance Club**.
+- **Block & Unblock Controls:** Blocking and unblocking between members succeeded, updating squad roster visibility (`1 / 12` hidden while blocked, `2 / 12` restored upon unblock) and blocked-users state.
+- **Abuse / Safety Reporting:** Account B successfully submitted an abuse report (`Other` category).
+- **Notification Preferences:** Squad activity notification alerts toggle (`OFF`/`ON`) updated cleanly for Account A.
+- **Ownership Transfer:** Ownership transfer in **Balance Club** from Account A to Account B succeeded (`Account B = Owner`, `Account A = Member`).
+- **Targeted Invitations by Member ID:** Account A successfully created targeted invitations for Account B's Member ID in both **Night Owls** and **Decline Test** squads.
+
+### Untested / Not Verified Behavior (Do Not Claim PASS)
+- **Accepting and declining the two targeted invitations** (created for Account B in **Night Owls** and **Decline Test**).
+- **Leaving a squad** (`Leave squad`).
+- **Removing a squad member** (`Remove`).
+- **Deleting a squad** (`Delete squad`).
+- **Simultaneous two-device Realtime push:** Single-device switching verified persistent invite-accepted notifications, while live cross-device foreground Realtime push without switching accounts remains unverified.
+- **Preserved Runtime Items (`NOT VERIFIED`):** Unattended wall-clock `AlarmManager` firing, physical device reboot recovery (`RotBootReceiver`), `100+` live OS notifications, and standalone release APK generation.
+
+---
+
+## 9. Known Limitations & Unverified Scenarios
 
 1. **App-Level Foreground Granularity Only:** `UsageStatsManager` cannot verify individual Reels watched; ROT reports **estimated Instagram foreground time** only.
 2. **OS `UsageEvents` Retention (~7 Days):** Android retains raw `UsageEvents` for approximately 7 days before pruning older events.
-3. **Local-Only Social Preview:** The Leaderboard tab uses local demo club members merged with the user's live XP; real backend accounts, squads, and friend challenges remain post-MVP.
-4. **Pending Live Runtime Checks (`NOT VERIFIED`):** Unattended wall-clock `AlarmManager` firing, physical device reboot recovery (`RotBootReceiver`), `100+` live notifications (`99+` badge overflow tested in unit tests only), and standalone release APK generation have not yet been verified on hardware.
+3. **Mixed Social Model:** **Squad** uses authenticated Supabase cloud sync (`cloudSquads.ts`), whereas **Friends** and **Campus** tabs remain **Local Demo Preview** entries.
+4. **Untested Flows Listed Above:** Targeted invite accept/decline, `Leave squad`, `Remove` member, `Delete squad`, unattended wall-clock alarms, physical reboot recovery, `100+` live notifications, and standalone release APK distribution remain unverified on hardware.
+

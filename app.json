@@ -18,7 +18,8 @@
       "package": "com.rot.brainrotclub"
     },
     "plugins": [
-      "expo-asset"
+      "expo-asset",
+      "expo-secure-store"
     ]
   }
 }
