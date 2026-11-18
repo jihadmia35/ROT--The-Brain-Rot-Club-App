@@ -26,7 +26,7 @@ export async function fetchCloudNotificationsFeed(userId: string): Promise<{
         .select('*')
         .eq('recipient_user_id', userId)
         .order('created_at', { ascending: false })
-        .limit(50),
+        .limit(100),
       client
         .from('squad_invitations')
         .select('*')

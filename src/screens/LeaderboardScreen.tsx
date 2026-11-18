@@ -1,8 +1,6 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
   ScrollView,
   Share,
   StyleSheet,
@@ -38,6 +36,10 @@ import {
   transferCloudSquadOwnership,
   unblockCloudUser,
 } from '../utils/cloudSquads';
+import {
+  TextInputRefTarget,
+  useKeyboardAwareScroll,
+} from '../utils/useKeyboardAwareScroll';
 import Icon from '../components/Icon';
 
 type Props = {
@@ -51,6 +53,8 @@ type Props = {
   authBusy: boolean;
   onSignInWithGoogle: () => void;
   onToast: (message: string) => void;
+  requestedTab?: LeaderboardTab;
+  requestedTabSeq?: number;
 };
 
 export default function LeaderboardScreen({
@@ -64,8 +68,16 @@ export default function LeaderboardScreen({
   authBusy,
   onSignInWithGoogle,
   onToast,
+  requestedTab,
+  requestedTabSeq = 0,
 }: Props) {
-  const [tab, setTab] = useState<LeaderboardTab>('Friends');
+  const [tab, setTab] = useState<LeaderboardTab>(requestedTab ?? 'Friends');
+
+  useEffect(() => {
+    if (requestedTabSeq > 0 && requestedTab) {
+      setTab(requestedTab);
+    }
+  }, [requestedTab, requestedTabSeq]);
 
   // Cloud Squad workspace state (strictly active when authenticated on Squad tab)
   const [workspace, setWorkspace] = useState<SquadWorkspaceSnapshot | null>(null);
@@ -88,6 +100,18 @@ export default function LeaderboardScreen({
   const [confirmLeaveSquad, setConfirmLeaveSquad] = useState(false);
   const [confirmDeleteSquad, setConfirmDeleteSquad] = useState(false);
   const [showBlockedList, setShowBlockedList] = useState(false);
+
+  const {
+    scrollRef,
+    bottomSpacer,
+    handleScroll,
+    handleScrollLayout,
+    focusInput,
+  } = useKeyboardAwareScroll();
+  const targetInviteeInputRef = useRef<TextInputRefTarget>(null);
+  const reportDetailsInputRef = useRef<TextInputRefTarget>(null);
+  const newSquadNameInputRef = useRef<TextInputRefTarget>(null);
+  const inviteCodeInputRef = useRef<TextInputRefTarget>(null);
 
   const cloudUserId = cloudIdentity?.userId ?? null;
   const cloudXp = cloudIdentity?.cloudXp ?? 0;
@@ -382,18 +406,20 @@ export default function LeaderboardScreen({
   }
 
   return (
-    <KeyboardAvoidingView
+    <ScrollView
+      ref={scrollRef}
       style={styles.scroll}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'android' ? 80 : 0}
+      contentContainerStyle={[
+        styles.content,
+        { paddingBottom: 40 + bottomSpacer },
+      ]}
+      showsVerticalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
+      keyboardDismissMode="on-drag"
+      scrollEventThrottle={16}
+      onScroll={(e) => handleScroll(e.nativeEvent.contentOffset.y)}
+      onLayout={handleScrollLayout}
     >
-      <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={styles.content}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
-      >
         {/* Header */}
         <Text style={styles.eyebrow}>FRIENDLY COMPETITION</Text>
         <Text style={styles.heading}>
@@ -634,6 +660,7 @@ export default function LeaderboardScreen({
                         </Text>
                         <View style={styles.inputRow}>
                           <TextInput
+                            ref={targetInviteeInputRef}
                             style={styles.textInput}
                             value={targetInviteeId}
                             onChangeText={setTargetInviteeId}
@@ -642,6 +669,13 @@ export default function LeaderboardScreen({
                             autoCapitalize="none"
                             autoCorrect={false}
                             maxLength={64}
+                            returnKeyType="send"
+                            onFocus={() =>
+                              focusInput(targetInviteeInputRef.current, 32)
+                            }
+                            onSubmitEditing={() =>
+                              void handleSendTargetedInvite()
+                            }
                           />
                           <TouchableOpacity
                             style={styles.smallPrimaryBtn}
@@ -891,12 +925,23 @@ export default function LeaderboardScreen({
                                       ))}
                                     </View>
                                     <TextInput
-                                      style={styles.textInput}
+                                      ref={reportDetailsInputRef}
+                                      style={[
+                                        styles.textInput,
+                                        styles.textInputMultiline,
+                                      ]}
                                       value={reportDetails}
                                       onChangeText={setReportDetails}
                                       placeholder="Optional details (max 1000 chars)"
                                       placeholderTextColor="#a395b2"
                                       maxLength={1000}
+                                      multiline
+                                      onFocus={() =>
+                                        focusInput(
+                                          reportDetailsInputRef.current,
+                                          64
+                                        )
+                                      }
                                     />
                                     <TouchableOpacity
                                       style={styles.smallPrimaryBtn}
@@ -981,12 +1026,16 @@ export default function LeaderboardScreen({
                 <Text style={styles.eyebrow}>CREATE A SQUAD</Text>
                 <View style={styles.inputRow}>
                   <TextInput
+                    ref={newSquadNameInputRef}
                     style={styles.textInput}
                     value={newSquadName}
                     onChangeText={setNewSquadName}
                     placeholder="Squad name (2–40 chars)"
                     placeholderTextColor="#a395b2"
                     maxLength={40}
+                    returnKeyType="done"
+                    onFocus={() => focusInput(newSquadNameInputRef.current, 48)}
+                    onSubmitEditing={() => void handleCreateSquad()}
                   />
                   <TouchableOpacity
                     style={styles.smallPrimaryBtn}
@@ -1002,6 +1051,7 @@ export default function LeaderboardScreen({
                 </Text>
                 <View style={styles.inputRow}>
                   <TextInput
+                    ref={inviteCodeInputRef}
                     style={styles.textInput}
                     value={inviteCodeInput}
                     onChangeText={setInviteCodeInput}
@@ -1009,6 +1059,9 @@ export default function LeaderboardScreen({
                     placeholderTextColor="#a395b2"
                     autoCapitalize="characters"
                     maxLength={64}
+                    returnKeyType="go"
+                    onFocus={() => focusInput(inviteCodeInputRef.current, 48)}
+                    onSubmitEditing={() => void handleJoinByCode()}
                   />
                   <TouchableOpacity
                     style={styles.smallPrimaryBtn}
@@ -1202,7 +1255,6 @@ export default function LeaderboardScreen({
           </>
         )}
       </ScrollView>
-    </KeyboardAvoidingView>
   );
 }
 
@@ -1514,6 +1566,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     color: COLORS.ink,
+  },
+  textInputMultiline: {
+    minHeight: 54,
+    maxHeight: 110,
+    textAlignVertical: 'top',
   },
   primaryBtn: {
     flexDirection: 'row',

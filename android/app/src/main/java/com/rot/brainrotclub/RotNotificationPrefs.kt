@@ -46,7 +46,9 @@ object RotNotificationPrefs {
     private const val KEY_CONFIG_JSON = "config_json"
     private const val KEY_SENT_BY_DATE = "sent_by_date_json"
     private const val KEY_NOTIFICATION_HISTORY = "notification_history_json"
+    private const val KEY_CLOUD_OS_DEDUP_IDS = "cloud_os_dedup_ids_json"
     private const val MAX_HISTORY_ITEMS = 150
+    private const val MAX_CLOUD_DEDUP_ITEMS = 300
     private val historySequence = AtomicInteger(0)
 
     fun todayDateKey(nowMs: Long = System.currentTimeMillis()): String {
@@ -325,5 +327,45 @@ object RotNotificationPrefs {
         }
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putString(KEY_NOTIFICATION_HISTORY, arr.toString()).commit()
+    }
+
+    @Synchronized
+    fun hasCloudOsDedupKey(context: Context, dedupKey: String): Boolean {
+        if (dedupKey.isBlank()) return false
+        return loadCloudOsDedupList(context).contains(dedupKey)
+    }
+
+    @Synchronized
+    fun recordCloudOsDedupKey(context: Context, dedupKey: String): Boolean {
+        if (dedupKey.isBlank()) return false
+        val list = loadCloudOsDedupList(context).toMutableList()
+        if (list.contains(dedupKey)) return false
+        list.add(0, dedupKey)
+        val trimmed = if (list.size > MAX_CLOUD_DEDUP_ITEMS) {
+            list.subList(0, MAX_CLOUD_DEDUP_ITEMS)
+        } else {
+            list
+        }
+        val arr = JSONArray()
+        for (item in trimmed) arr.put(item)
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putString(KEY_CLOUD_OS_DEDUP_IDS, arr.toString()).commit()
+        return true
+    }
+
+    private fun loadCloudOsDedupList(context: Context): List<String> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val raw = prefs.getString(KEY_CLOUD_OS_DEDUP_IDS, null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            val list = ArrayList<String>(arr.length())
+            for (i in 0 until arr.length()) {
+                val value = arr.optString(i, "")
+                if (value.isNotBlank()) list.add(value)
+            }
+            list
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 }

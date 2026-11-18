@@ -6,8 +6,6 @@ import {
   ScrollView,
   TouchableOpacity,
   TextInput,
-  KeyboardAvoidingView,
-  Platform,
 } from 'react-native';
 import { COLORS, RADIUS } from '../constants/theme';
 import { MOOD_OPTIONS } from '../constants/data';
@@ -30,6 +28,10 @@ import {
   UsageDisplayState,
 } from '../utils/domainLogic';
 import { CloudAccountIdentity, CloudAuthStatus } from '../utils/authHelpers';
+import {
+  TextInputRefTarget,
+  useKeyboardAwareScroll,
+} from '../utils/useKeyboardAwareScroll';
 import MissionRow from '../components/MissionRow';
 import DailyChestCard from '../components/DailyChestCard';
 import Icon from '../components/Icon';
@@ -113,8 +115,15 @@ export default function TodayScreen({
   );
   const [moodNote, setMoodNote] = useState(todayMoodLog?.note ?? '');
   const [showBreakdown, setShowBreakdown] = useState(false);
-  const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
-  const moodCardYRef = useRef(0);
+  const {
+    scrollRef,
+    bottomSpacer,
+    handleScroll,
+    handleScrollLayout,
+    focusInput,
+  } = useKeyboardAwareScroll();
+  const draftNameInputRef = useRef<TextInputRefTarget>(null);
+  const moodNoteInputRef = useRef<TextInputRefTarget>(null);
 
   useEffect(() => {
     if (!editingName) {
@@ -171,19 +180,20 @@ export default function TodayScreen({
     usageDisplay.minutes !== null;
 
   return (
-    <KeyboardAvoidingView
+    <ScrollView
+      ref={scrollRef}
       style={styles.scroll}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'android' ? 80 : 0}
+      contentContainerStyle={[
+        styles.content,
+        { paddingBottom: 48 + bottomSpacer },
+      ]}
+      showsVerticalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
+      keyboardDismissMode="on-drag"
+      scrollEventThrottle={16}
+      onScroll={(e) => handleScroll(e.nativeEvent.contentOffset.y)}
+      onLayout={handleScrollLayout}
     >
-      <ScrollView
-        ref={scrollRef}
-        style={styles.scroll}
-        contentContainerStyle={[styles.content, { paddingBottom: 48 }]}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
-      >
       {/* Welcome */}
       <View style={styles.welcomeRow}>
         <Text style={styles.eyebrow}>{dateHeader}</Text>
@@ -216,6 +226,7 @@ export default function TodayScreen({
             </Text>
             <View style={styles.nameInputRow}>
               <TextInput
+                ref={draftNameInputRef}
                 style={styles.nameInput}
                 value={draftName}
                 onChangeText={setDraftName}
@@ -224,6 +235,7 @@ export default function TodayScreen({
                 placeholderTextColor="#a395b2"
                 autoCapitalize="words"
                 returnKeyType="done"
+                onFocus={() => focusInput(draftNameInputRef.current, 64)}
                 onSubmitEditing={() => {
                   onSaveDisplayName(draftName, syncNameToCloud);
                   setEditingName(false);
@@ -399,12 +411,7 @@ export default function TodayScreen({
       </View>
 
       {/* Mood Badge & Interactive Mood Logger */}
-      <View
-        style={styles.moodContainer}
-        onLayout={(e) => {
-          moodCardYRef.current = e.nativeEvent.layout.y;
-        }}
-      >
+      <View style={styles.moodContainer}>
         <View style={styles.moodBadgeRow}>
           <View style={styles.moodFace}>
             <Text style={styles.moodEmoji}>{brainrotIndex.moodEmoji}</Text>
@@ -466,6 +473,7 @@ export default function TodayScreen({
               })}
             </View>
             <TextInput
+              ref={moodNoteInputRef}
               style={styles.moodNoteInput}
               value={moodNote}
               onChangeText={setMoodNote}
@@ -473,14 +481,7 @@ export default function TodayScreen({
               placeholder="One thing you want to make time for today (optional)..."
               placeholderTextColor="#a395b2"
               returnKeyType="done"
-              onFocus={() => {
-                setTimeout(() => {
-                  scrollRef.current?.scrollTo({
-                    y: Math.max(0, moodCardYRef.current - 12),
-                    animated: true,
-                  });
-                }, 140);
-              }}
+              onFocus={() => focusInput(moodNoteInputRef.current, 68)}
             />
             <View style={styles.moodDrawerFooter}>
               <Text style={styles.moodDrawerHint}>
@@ -822,8 +823,7 @@ export default function TodayScreen({
             : 'Complete a mission or focus break to grow your brain bank.'}
         </Text>
       </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+    </ScrollView>
   );
 }
 

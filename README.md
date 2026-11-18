@@ -6,7 +6,7 @@ Full Phase 1–2 historical milestones, Stage 3–4 cloud architecture, physical
 
 ---
 
-## Current Scope (`fix/rot-cloud-account-isolation` on `master`)
+## Current Scope (`fix/rot-android-release-hardening` on `master`)
 
 1. **Android Development Build & Native Bridge (`android/`):** Native Android project (`com.rot.brainrotclub`) configured for **Expo `~58.0.24`**, **React Native `0.88.1`**, **React `19.3.0`**, **TypeScript `~6.0.3`**, and **WorkManager `2.10.0`** with New Architecture and Hermes enabled.
 2. **Local-First Profile & Device Identity:** Automatically resolves the Android device name (`Settings.Global.DEVICE_NAME`, `bluetooth_name`, or `Build.MODEL`) on first launch, allows custom display-name editing from Today or Settings (max 28 characters), persists locally in `AsyncStorage`, and reverts cleanly to the device default or `"ROT User"` fallback.
@@ -35,6 +35,9 @@ Full Phase 1–2 historical milestones, Stage 3–4 cloud architecture, physical
 10. **Native Notifications, Persistent Unread Badge, Shareable Cards & Privacy Controls:**
     - Real Android notification channels, `WorkManager` 15-minute periodic checks, `AlarmManager` daily reminders, quiet hours, `RotBootReceiver`, and persistent unread inbox merged with cloud notifications in `NotificationCenterModal.tsx`.
     - Swipeable **Archetype Collector Card** and **Weekly Achievement Card** (`1080x1350` Feed / `1080x1920` Story PNGs) with Private Mode stats redaction, `MediaStore` deduplication, Android Share Sheet, JSON export (`rot-user-data-export-v1`), and two-tap `Clear local history`.
+11. **Android v1.0 Release Hardening & Signed RC2 Verification (`fix/rot-android-release-hardening`):**
+    - Configured non-debuggable release builds in `android/app/build.gradle` with explicit `rot-upload.jks` signing via `android/keystore.properties` (or `ROT_UPLOAD_*` Gradle/env properties) and zero fallback to `debug.keystore`.
+    - Enabled R8 minification and resource shrinking (`android/gradle.properties`) and preserved generated `RoomDatabase` zero-argument constructors (`-keep class * extends androidx.room.RoomDatabase { <init>(); }`) in `android/app/proguard-rules.pro` so WorkManager `WorkDatabase_Impl` initializes cleanly in release builds.
 
 ---
 
@@ -56,7 +59,7 @@ Full Phase 1–2 historical milestones, Stage 3–4 cloud architecture, physical
 Clone the repository, check out your working branch, and install dependencies:
 
 ```bash
-git checkout fix/rot-cloud-account-isolation
+git checkout fix/rot-android-release-hardening
 npm install
 ```
 
@@ -77,7 +80,7 @@ Database schema migrations (`supabase/migrations/20261118000001`–`202611180000
 
 ---
 
-## 3. Android Debug Build
+## 3. Android Debug & Release Builds
 
 To compile the native Android debug APK (`android/app/build/outputs/apk/debug/app-debug.apk`):
 
@@ -87,6 +90,14 @@ cd android && ./gradlew :app:assembleDebug --no-daemon
 
 # Windows (PowerShell / CMD)
 cd android && .\gradlew.bat :app:assembleDebug --no-daemon
+```
+
+To compile the signed standalone release APK (`android/app/build/outputs/apk/release/app-release.apk`) once `android/keystore.properties` (or `ROT_UPLOAD_*` env/Gradle properties) is configured outside Git:
+
+```powershell
+cd android
+$env:NODE_OPTIONS="--max-old-space-size=4096"
+.\gradlew.bat :app:assembleRelease --no-daemon --max-workers=1
 ```
 
 > **Windows Long-Path Mitigation:** `android/app/build.gradle` configures a root-relative CMake staging directory (`${rootDir.toPath().root}rot-cxx`) and `-DCMAKE_OBJECT_PATH_MAX=210` so Windows builds succeed regardless of repository folder depth.
@@ -143,7 +154,7 @@ npm run lint
 npm test
 ```
 
-Latest verified suite: `tsc --noEmit` (`0` errors), `npm run lint` (`44` files), `npm test` (`31` passed, `0` failed), and `:app:assembleDebug` (`BUILD SUCCESSFUL`).
+Latest verified suite: `tsc --noEmit` (`0` errors), `npm run lint` (`48` files), `npm test` (`33` passed, `0` failed), and signed standalone `:app:assembleRelease` (**RC2**, `BUILD SUCCESSFUL`).
 
 ---
 
@@ -151,7 +162,7 @@ Latest verified suite: `tsc --noEmit` (`0` errors), `npm run lint` (`44` files),
 
 The tables below distinguish **automated tests**, **device-tested behavior** on a Xiaomi Redmi 11 Prime (two distinct Google/Supabase accounts labeled **Account A** and **Account B**, with sensitive emails, UUIDs, and invite codes redacted), and **explicitly untested behavior**.
 
-### Automated Tests (`31 passed, 0 failed`)
+### Automated Tests (`33 passed, 0 failed`)
 - **Storage, Auth & Account Isolation (`src/utils/__tests__/authAndStorage.test.ts`):**
   - Chunked UTF-8 `SecureStore` session serialization and env validation rejecting `service_role`/secret keys.
   - Simulated Google Sign-In + Supabase `signInWithIdToken`, session restoration across restarts, and cold-start `ensureGoogleSignInConfigured()` execution during `performSignOut`.
@@ -174,13 +185,16 @@ The tables below distinguish **automated tests**, **device-tested behavior** on 
 - **Ownership Transfer:** Ownership transfer in **Balance Club** from Account A to Account B succeeded (`Account B = Owner`, `Account A = Member`).
 - **Targeted Invitations by Member ID:** Account A successfully created targeted invitations for Account B's Member ID in both **Night Owls** and **Decline Test** squads.
 
+- **Standalone Release APK Verification (RC2 on Xiaomi Redmi 11 Prime, Android 14):**
+  - Verified signed standalone `RC2` (`ROT-1.0.0-rc2-workmanager-fix-signed.apk`, R8 + resource shrinking enabled) cold launch without Metro, WorkManager/JobScheduler/AlarmManager initialization, Usage Access tracking, all 6 tabs, OS notification posting & tap routing, Guest XP progression, release SHA-1 Google Sign-In, Cloud XP sync, and live Squad loading/refresh with zero fatal Android/React Native logcat errors.
+
 ### Untested / Not Verified Behavior (Do Not Claim PASS)
 - **Accepting and declining the two targeted invitations** (created for Account B in **Night Owls** and **Decline Test**).
 - **Leaving a squad** (`Leave squad`).
 - **Removing a squad member** (`Remove`).
 - **Deleting a squad** (`Delete squad`).
 - **Simultaneous two-device Realtime push:** Single-device switching verified persistent invite-accepted notifications, while live cross-device foreground Realtime push without switching accounts remains unverified.
-- **Preserved Runtime Items (`NOT VERIFIED`):** Unattended wall-clock `AlarmManager` firing, physical device reboot recovery (`RotBootReceiver`), `100+` live OS notifications, and standalone release APK generation.
+- **Preserved Runtime Items (`NOT VERIFIED`):** Unattended wall-clock `AlarmManager` firing, physical device reboot recovery (`RotBootReceiver`), and `100+` live OS notifications.
 
 ---
 
@@ -189,5 +203,5 @@ The tables below distinguish **automated tests**, **device-tested behavior** on 
 1. **App-Level Foreground Granularity Only:** `UsageStatsManager` cannot verify individual Reels watched; ROT reports **estimated Instagram foreground time** only.
 2. **OS `UsageEvents` Retention (~7 Days):** Android retains raw `UsageEvents` for approximately 7 days before pruning older events.
 3. **Mixed Social Model:** **Squad** uses authenticated Supabase cloud sync (`cloudSquads.ts`), whereas **Friends** and **Campus** tabs remain **Local Demo Preview** entries.
-4. **Untested Flows Listed Above:** Targeted invite accept/decline, `Leave squad`, `Remove` member, `Delete squad`, unattended wall-clock alarms, physical reboot recovery, `100+` live notifications, and standalone release APK distribution remain unverified on hardware.
+4. **Untested Flows Listed Above:** Targeted invite accept/decline, `Leave squad`, `Remove` member, `Delete squad`, simultaneous two-device Realtime push, unattended wall-clock alarms, physical reboot recovery, and `100+` live notifications remain unverified on hardware.
 

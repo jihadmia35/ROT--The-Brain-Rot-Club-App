@@ -144,6 +144,9 @@ export type NotificationStatusSnapshot = {
   appNotificationsEnabled: boolean;
   nudgesChannelEnabled: boolean;
   remindersChannelEnabled: boolean;
+  squadsChannelEnabled?: boolean;
+  ignoringBatteryOptimizations?: boolean;
+  deviceManufacturer?: string;
   statusCode: 'allowed' | 'permission_required' | 'notifications_off' | 'channel_disabled';
   quietHoursActiveNow: boolean;
   sentKeysToday: string[];

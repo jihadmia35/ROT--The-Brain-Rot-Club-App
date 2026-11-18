@@ -7,16 +7,25 @@ import android.content.Intent
 class RotAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         val action = intent?.action ?: return
-        when (action) {
-            RotNotificationScheduler.ACTION_EVENING_REMINDER -> {
-                RotNotificationHelper.evaluateScheduledReminder(context, "evening")
-                RotNotificationScheduler.scheduleDailyAlarms(context)
+        val pendingResult = goAsync()
+        Thread {
+            try {
+                when (action) {
+                    RotNotificationScheduler.ACTION_EVENING_REMINDER -> {
+                        RotNotificationHelper.evaluateScheduledReminder(context, "evening")
+                        RotNotificationScheduler.scheduleDailyAlarms(context)
+                    }
+                    RotNotificationScheduler.ACTION_STREAK_REMINDER -> {
+                        RotNotificationHelper.evaluateScheduledReminder(context, "streak")
+                        RotNotificationScheduler.scheduleDailyAlarms(context)
+                    }
+                }
+            } catch (_: Exception) {
+                // Prevent receiver crash on OEM background restrictions
+            } finally {
+                pendingResult.finish()
             }
-            RotNotificationScheduler.ACTION_STREAK_REMINDER -> {
-                RotNotificationHelper.evaluateScheduledReminder(context, "streak")
-                RotNotificationScheduler.scheduleDailyAlarms(context)
-            }
-        }
+        }.start()
     }
 }
 
@@ -28,8 +37,17 @@ class RotBootReceiver : BroadcastReceiver() {
             action == Intent.ACTION_TIME_CHANGED ||
             action == Intent.ACTION_TIMEZONE_CHANGED
         ) {
-            RotNotificationHelper.ensureChannels(context)
-            RotNotificationScheduler.rescheduleAll(context)
+            val pendingResult = goAsync()
+            Thread {
+                try {
+                    RotNotificationHelper.ensureChannels(context)
+                    RotNotificationScheduler.rescheduleAll(context)
+                } catch (_: Exception) {
+                    // Ignore OEM background reschedule restrictions
+                } finally {
+                    pendingResult.finish()
+                }
+            }.start()
         }
     }
 }

@@ -10,6 +10,7 @@ import {
   AppState,
   AppStateStatus,
   Share,
+  Keyboard,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
@@ -20,6 +21,7 @@ import {
   CardType,
   Celebration,
   InstagramUsageSummary,
+  LeaderboardTab,
   MoodId,
   NotificationInboxSnapshot,
   NotificationStatusSnapshot,
@@ -70,13 +72,18 @@ import {
   clearNativeNotificationHistory,
   fetchNotificationInbox,
   fetchNotificationStatus,
+  getInitialNotificationRoute,
+  hasNotificationPermissionSilent,
   markAllNativeNotificationsRead,
+  openAndroidBatteryOptimizationSettings,
   openAndroidNotificationSettings,
   openAndroidUsageAccessSettings,
+  postCloudMirrorOsNotification,
   queryDeviceProfileInfo,
   queryInstagramUsageSummary,
   sendLocalNotification,
   subscribeToNativeNotificationUpdates,
+  subscribeToNotificationOpens,
   syncNativeNotificationConfig,
 } from './src/utils/usageStats';
 import {
@@ -135,6 +142,13 @@ import {
   acceptCloudSquadInvitation,
   declineCloudSquadInvitation,
 } from './src/utils/cloudSquads';
+import {
+  isCloudNotificationTypeEnabled,
+  parseNotificationTargetRoute,
+  sanitizeNotificationText,
+  selectCloudNotificationsToMirror,
+} from './src/utils/notificationMirrorsCore';
+import { useReducedMotion } from './src/utils/useReducedMotion';
 import TodayScreen from './src/screens/TodayScreen';
 import MissionsScreen from './src/screens/MissionsScreen';
 import BadgesScreen from './src/screens/BadgesScreen';
@@ -181,6 +195,7 @@ export default function App() {
       appNotificationsEnabled: false,
       nudgesChannelEnabled: false,
       remindersChannelEnabled: false,
+      squadsChannelEnabled: false,
       statusCode: 'notifications_off',
       quietHoursActiveNow: false,
       sentKeysToday: [],
@@ -216,6 +231,28 @@ export default function App() {
     string[]
   >([]);
   const [inviteActionBusy, setInviteActionBusy] = useState(false);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [requestedLeaderboardTab, setRequestedLeaderboardTab] =
+    useState<LeaderboardTab | undefined>(undefined);
+  const [requestedLeaderboardTabSeq, setRequestedLeaderboardTabSeq] =
+    useState(0);
+  const reducedMotion = useReducedMotion();
+
+  useEffect(() => {
+    const showEv = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEv = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const subShow = Keyboard.addListener(showEv, () => setKeyboardVisible(true));
+    const subHide = Keyboard.addListener(hideEv, () => setKeyboardVisible(false));
+    return () => {
+      subShow.remove();
+      subHide.remove();
+    };
+  }, []);
+
+  const handleSelectView = useCallback((nextView: ViewType) => {
+    Keyboard.dismiss();
+    setActiveView(nextView);
+  }, []);
 
   const appStateRef = useRef(appState);
   appStateRef.current = appState;
@@ -231,6 +268,22 @@ export default function App() {
   const lastAutoRefreshAtRef = useRef(0);
   const lastProfilePatchSigRef = useRef<string | null>(null);
   const profileSyncInFlightRef = useRef(false);
+  const mirroredCloudOsKeysRef = useRef<Set<string>>(new Set());
+  const cloudNotifPrefsRef = useRef<DefaultNotificationPreferences>(cloudNotifPrefs);
+  cloudNotifPrefsRef.current = cloudNotifPrefs;
+  const hasPromptedNotifPermThisSessionRef = useRef(false);
+  const screenOpacity = useRef(new Animated.Value(1)).current;
+  const screenTranslateY = useRef(new Animated.Value(0)).current;
+  const xpPillScale = useRef(new Animated.Value(1)).current;
+  const tabScaleMapRef = useRef<Record<ViewType, Animated.Value>>({
+    Today: new Animated.Value(1),
+    Missions: new Animated.Value(1),
+    Badges: new Animated.Value(1),
+    Leaderboard: new Animated.Value(1),
+    Card: new Animated.Value(1),
+    Settings: new Animated.Value(1),
+  }).current;
+  const hasMountedViewRef = useRef(false);
 
   const flushPendingCloudXp = useCallback(
     async (uidOverride?: string, profileOverride?: CloudProfile | null) => {
@@ -329,27 +382,70 @@ export default function App() {
     [hydrated]
   );
 
-  const refreshCloudNotifications = useCallback(async (uidOverride?: string) => {
-    const uid = uidOverride ?? cloudSessionRef.current?.user?.id;
-    if (!uid || cloudAuthStatusRef.current !== 'authenticated') {
-      return;
-    }
-    const [feed, prefs] = await Promise.all([
-      fetchCloudNotificationsFeed(uid),
-      fetchCloudNotificationPreferences(uid),
-    ]);
-    if (
-      cloudAuthStatusRef.current !== 'authenticated' ||
-      cloudSessionRef.current?.user?.id !== uid
-    ) {
-      return;
-    }
-    if (!feed.error) {
-      setCloudNotifications(feed.notifications);
-      setCloudPendingInvites(feed.pendingInvites);
-    }
-    setCloudNotifPrefs(prefs);
-  }, []);
+  const mirrorCloudNotificationsToAndroid = useCallback(
+    async (
+      rows: SocialNotificationRow[],
+      uid: string,
+      prefs: DefaultNotificationPreferences
+    ) => {
+      if (Platform.OS !== 'android' || !uid || rows.length === 0) return;
+      const specs = selectCloudNotificationsToMirror(
+        rows,
+        uid,
+        prefs,
+        mirroredCloudOsKeysRef.current,
+        { maxBatch: 5 }
+      );
+      if (specs.length === 0) return;
+
+      const allowed = await hasNotificationPermissionSilent();
+      if (!allowed) return;
+
+      for (const spec of specs) {
+        if (
+          cloudAuthStatusRef.current !== 'authenticated' ||
+          cloudSessionRef.current?.user?.id !== uid
+        ) {
+          return;
+        }
+        mirroredCloudOsKeysRef.current.add(spec.dedupKey);
+        await postCloudMirrorOsNotification(
+          spec.dedupKey,
+          spec.title,
+          spec.body,
+          spec.targetRoute
+        );
+      }
+    },
+    []
+  );
+
+  const refreshCloudNotifications = useCallback(
+    async (uidOverride?: string) => {
+      const uid = uidOverride ?? cloudSessionRef.current?.user?.id;
+      if (!uid || cloudAuthStatusRef.current !== 'authenticated') {
+        return;
+      }
+      const [feed, prefs] = await Promise.all([
+        fetchCloudNotificationsFeed(uid),
+        fetchCloudNotificationPreferences(uid),
+      ]);
+      if (
+        cloudAuthStatusRef.current !== 'authenticated' ||
+        cloudSessionRef.current?.user?.id !== uid
+      ) {
+        return;
+      }
+      setCloudNotifPrefs(prefs);
+      cloudNotifPrefsRef.current = prefs;
+      if (!feed.error) {
+        setCloudNotifications(feed.notifications);
+        setCloudPendingInvites(feed.pendingInvites);
+        void mirrorCloudNotificationsToAndroid(feed.notifications, uid, prefs);
+      }
+    },
+    [mirrorCloudNotificationsToAndroid]
+  );
 
   const updateAndPersist = useCallback(
     (
@@ -708,7 +804,14 @@ export default function App() {
         if (row.notification_type === 'squad_invite_received') {
           void refreshCloudNotifications(uid);
         }
-        setToast(row.title);
+        const prefs = cloudNotifPrefsRef.current;
+        void mirrorCloudNotificationsToAndroid([row], uid, prefs);
+        if (isCloudNotificationTypeEnabled(row.notification_type, prefs)) {
+          const safeTitle = sanitizeNotificationText(row.title, 90);
+          if (safeTitle) {
+            setToast(safeTitle);
+          }
+        }
       },
       onUpdate: (row) => {
         setCloudNotifications((prev) => upsertCloudNotificationInList(prev, row));
@@ -718,7 +821,12 @@ export default function App() {
     return () => {
       unsubscribe();
     };
-  }, [cloudAuthStatus, cloudSession?.user?.id, refreshCloudNotifications]);
+  }, [
+    cloudAuthStatus,
+    cloudSession?.user?.id,
+    refreshCloudNotifications,
+    mirrorCloudNotificationsToAndroid,
+  ]);
 
   // Re-query UsageStats and Notification status automatically when returning from Android settings
   useEffect(() => {
@@ -727,10 +835,11 @@ export default function App() {
       (nextStatus: AppStateStatus) => {
         if (nextStatus === 'active' && hydrated) {
           const now = Date.now();
-          if (now - lastAutoRefreshAtRef.current >= 2500) {
-            void syncUsageStats(false);
-          }
-          void refreshNotificationStatus();
+          void refreshNotificationStatus().then(() => {
+            if (now - lastAutoRefreshAtRef.current >= 2500) {
+              void syncUsageStats(false);
+            }
+          });
           if (
             cloudAuthStatusRef.current === 'authenticated' &&
             cloudSessionRef.current?.user?.id
@@ -890,7 +999,11 @@ export default function App() {
     if (evalRes.notifications.length > 0) {
       updateAndPersist(() => evalRes.nextState);
       void (async () => {
-        const allowed = await checkAndRequestNotificationPermission();
+        let allowed = await hasNotificationPermissionSilent();
+        if (!allowed && !hasPromptedNotifPermThisSessionRef.current) {
+          hasPromptedNotifPermThisSessionRef.current = true;
+          allowed = await checkAndRequestNotificationPermission();
+        }
         if (!allowed) return;
         for (const n of evalRes.notifications) {
           await sendLocalNotification(n.id, n.title, n.body);
@@ -906,6 +1019,37 @@ export default function App() {
     updateAndPersist,
     refreshNotificationStatus,
   ]);
+
+  // Smooth screen entrance transition on activeView change
+  useEffect(() => {
+    if (!hasMountedViewRef.current) {
+      hasMountedViewRef.current = true;
+      return;
+    }
+    if (reducedMotion) {
+      screenOpacity.setValue(1);
+      screenTranslateY.setValue(0);
+      return;
+    }
+    screenOpacity.setValue(0.86);
+    screenTranslateY.setValue(6);
+    Animated.parallel([
+      Animated.timing(screenOpacity, {
+        toValue: 1,
+        duration: 180,
+        useNativeDriver: true,
+      }),
+      Animated.timing(screenTranslateY, {
+        toValue: 0,
+        duration: 180,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [activeView, reducedMotion, screenOpacity, screenTranslateY]);
+
+  // Smooth XP pill counter step-up + pulse on XP increase
+  const [displayedXp, setDisplayedXp] = useState(() => calculateTotalXp(appState));
+  const prevXpTargetRef = useRef<number | null>(null);
 
   const syncCloudProfilePatch = useCallback(
     async (
@@ -1124,7 +1268,9 @@ export default function App() {
     if (res.ok) {
       setToast(`Joined ${res.data.squad_name}!`);
       setNotificationCenterOpen(false);
-      setActiveView('Leaderboard');
+      setRequestedLeaderboardTab('Squad');
+      setRequestedLeaderboardTabSeq((seq) => seq + 1);
+      handleSelectView('Leaderboard');
       if (cloudSessionRef.current?.user?.id) {
         void refreshCloudNotifications(cloudSessionRef.current.user.id);
       }
@@ -1439,21 +1585,21 @@ export default function App() {
   async function handleSendTestNotification() {
     await checkAndRequestNotificationPermission();
     const status = await refreshNotificationStatus();
-    if (status.statusCode === 'permission_required') {
+    if (!status.runtimePermissionGranted) {
       const msg =
         'Android notification permission is currently denied. Tap "Open Android Notification Settings" to allow ROT notifications.';
       setTestNotificationFeedback(msg);
       setToast('Notification permission required.');
       return;
     }
-    if (status.statusCode === 'notifications_off') {
+    if (!status.appNotificationsEnabled) {
       const msg =
         'Notifications are turned off for ROT in Android system settings.';
       setTestNotificationFeedback(msg);
       setToast('App notifications are disabled in Android.');
       return;
     }
-    if (status.statusCode === 'channel_disabled') {
+    if (!status.nudgesChannelEnabled) {
       const msg =
         'The ROT Wellbeing Nudges channel is muted/disabled in Android settings.';
       setTestNotificationFeedback(msg);
@@ -1502,8 +1648,8 @@ export default function App() {
             missions={missions}
             onMissionClick={handleToggleMission}
             onBreak={() => setBreakOpen(true)}
-            onViewMissions={() => setActiveView('Missions')}
-            onOpenSettings={() => setActiveView('Settings')}
+            onViewMissions={() => handleSelectView('Missions')}
+            onOpenSettings={() => handleSelectView('Settings')}
             chest={dailyChest}
             onClaimChest={handleClaimDailyChest}
             usageSummary={usageSummary}
@@ -1566,6 +1712,8 @@ export default function App() {
             authBusy={authBusy}
             onSignInWithGoogle={() => void handleSignInWithGoogle()}
             onToast={setToast}
+            requestedTab={requestedLeaderboardTab}
+            requestedTabSeq={requestedLeaderboardTabSeq}
           />
         );
       case 'Card':
@@ -1589,7 +1737,7 @@ export default function App() {
             onSelectFormat={(format: CardExportFormat) =>
               updateAndPersist((prev) => ({ ...prev, selectedCardFormat: format }))
             }
-            onEditName={() => setActiveView('Settings')}
+            onEditName={() => handleSelectView('Settings')}
             onToast={setToast}
           />
         );
@@ -1637,6 +1785,14 @@ export default function App() {
                 setToast('Open Android Settings > Apps > ROT > Notifications.');
               }
             }}
+            onOpenBatterySettings={async () => {
+              const opened = await openAndroidBatteryOptimizationSettings();
+              if (!opened) {
+                setToast(
+                  'Open Android Settings > Apps > ROT > Battery saver and set No restrictions.'
+                );
+              }
+            }}
             onRefreshNotificationStatus={() => {
               void refreshNotificationStatus().then(() => {
                 setToast('Notification status refreshed.');
@@ -1673,7 +1829,7 @@ export default function App() {
     }
   }
 
-  function handleOpenNotificationCenter() {
+  const handleOpenNotificationCenter = useCallback(() => {
     const unreadIds = notificationInbox.items
       .filter((item) => !item.read)
       .map((item) => item.id);
@@ -1692,10 +1848,86 @@ export default function App() {
       );
       void markCloudNotificationsReadOnServer(unreadCloudIds);
     }
-  }
+  }, [notificationInbox.items, cloudNotifications, cloudAuthStatus]);
+
+  const applyNotificationTargetRoute = useCallback(
+    (rawRoute: string | null | undefined) => {
+      const parsed = parseNotificationTargetRoute(rawRoute);
+      if (!parsed) return;
+      if (parsed.openNotificationCenter) {
+        handleOpenNotificationCenter();
+        return;
+      }
+      if (parsed.view) {
+        handleSelectView(parsed.view);
+      }
+      if (parsed.leaderboardTab) {
+        setRequestedLeaderboardTab(parsed.leaderboardTab);
+        setRequestedLeaderboardTabSeq((seq) => seq + 1);
+      }
+    },
+    [handleOpenNotificationCenter, handleSelectView]
+  );
+
+  // Route cold-launch & warm-tap Android notifications cleanly to their target screen
+  useEffect(() => {
+    if (!hydrated) return;
+    void getInitialNotificationRoute().then((route) => {
+      if (route) {
+        applyNotificationTargetRoute(route);
+      }
+    });
+  }, [hydrated, applyNotificationTargetRoute]);
+
+  useEffect(() => {
+    return subscribeToNotificationOpens((route) => {
+      applyNotificationTargetRoute(route);
+    });
+  }, [applyNotificationTargetRoute]);
+
+  // Animate XP pill counter & subtle pop when totalXp increases
+  useEffect(() => {
+    const prev = prevXpTargetRef.current;
+    prevXpTargetRef.current = totalXp;
+    if (!hydrated || prev === null || reducedMotion || totalXp <= prev) {
+      setDisplayedXp(totalXp);
+      return;
+    }
+    Animated.sequence([
+      Animated.spring(xpPillScale, {
+        toValue: 1.09,
+        tension: 260,
+        friction: 10,
+        useNativeDriver: true,
+      }),
+      Animated.spring(xpPillScale, {
+        toValue: 1,
+        tension: 200,
+        friction: 12,
+        useNativeDriver: true,
+      }),
+    ]).start();
+
+    const startVal = prev;
+    const delta = totalXp - startVal;
+    const durationMs = 300;
+    const startedAt = Date.now();
+    let rafId = 0;
+
+    const tick = () => {
+      const progress = Math.min(1, (Date.now() - startedAt) / durationMs);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setDisplayedXp(Math.round(startVal + delta * eased));
+      if (progress < 1) {
+        rafId = requestAnimationFrame(tick);
+      }
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [totalXp, hydrated, reducedMotion, xpPillScale]);
 
   function handleOpenXpLedger() {
-    setActiveView('Missions');
+    handleSelectView('Missions');
     setScrollToLedgerRequestId((id) => id + 1);
   }
 
@@ -1741,58 +1973,96 @@ export default function App() {
                 </View>
               )}
             </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.xpPill}
-              onPress={handleOpenXpLedger}
-              activeOpacity={0.72}
-              accessibilityRole="button"
-              accessibilityLabel={`Brain Bank XP: ${totalXp} XP. Tap to view XP Ledger`}
-            >
-              <Feather name="zap" size={13} color={COLORS.pink} />
-              <Text style={styles.xpText}>
-                <Text style={styles.xpBold}>{totalXp}</Text> XP
-              </Text>
-              <Feather name="chevron-right" size={11} color={COLORS.pink} />
-            </TouchableOpacity>
+            <Animated.View style={{ transform: [{ scale: xpPillScale }] }}>
+              <TouchableOpacity
+                style={styles.xpPill}
+                onPress={handleOpenXpLedger}
+                activeOpacity={0.72}
+                accessibilityRole="button"
+                accessibilityLabel={`Brain Bank XP: ${totalXp} XP. Tap to view XP Ledger`}
+              >
+                <Feather name="zap" size={13} color={COLORS.pink} />
+                <Text style={styles.xpText}>
+                  <Text style={styles.xpBold}>{displayedXp}</Text> XP
+                </Text>
+                <Feather name="chevron-right" size={11} color={COLORS.pink} />
+              </TouchableOpacity>
+            </Animated.View>
           </View>
         </View>
 
         {/* Screen Content */}
-        <View style={styles.screenContainer}>{renderScreen()}</View>
+        <Animated.View
+          style={[
+            styles.screenContainer,
+            {
+              opacity: screenOpacity,
+              transform: [{ translateY: screenTranslateY }],
+            },
+          ]}
+        >
+          {renderScreen()}
+        </Animated.View>
 
-        {/* Bottom Tab Bar */}
-        <View style={styles.tabBar}>
-          {tabs.map((tab) => {
-            const isActive = activeView === tab.key;
-            const pendingMissions = missions.length - completedMissions;
-            return (
-              <TouchableOpacity
-                key={tab.key}
-                style={styles.tabItem}
-                onPress={() => setActiveView(tab.key)}
-                activeOpacity={0.7}
-              >
-                <View style={[styles.tabIconWrap, isActive && styles.tabIconWrapActive]}>
-                  <Feather
-                    name={tab.icon as any}
-                    size={18}
-                    color={isActive ? COLORS.white : '#8d7e9c'}
-                  />
-                </View>
-                <Text style={[styles.tabLabel, isActive && styles.tabLabelActive]}>
-                  {tab.label}
-                </Text>
-                {tab.key === 'Missions' && pendingMissions > 0 && (
-                  <View style={[styles.tabBadge, isActive && styles.tabBadgeActive]}>
-                    <Text style={[styles.tabBadgeText, isActive && styles.tabBadgeTextActive]}>
-                      {pendingMissions}
-                    </Text>
-                  </View>
-                )}
-              </TouchableOpacity>
-            );
-          })}
-        </View>
+        {/* Bottom Tab Bar (hidden while soft keyboard is open so inputs stay unobstructed) */}
+        {!keyboardVisible && (
+          <View style={styles.tabBar}>
+            {tabs.map((tab) => {
+              const isActive = activeView === tab.key;
+              const pendingMissions = missions.length - completedMissions;
+              const tabScale = tabScaleMapRef[tab.key];
+              return (
+                <TouchableOpacity
+                  key={tab.key}
+                  style={styles.tabItem}
+                  onPress={() => {
+                    if (!reducedMotion) {
+                      Animated.sequence([
+                        Animated.timing(tabScale, {
+                          toValue: 0.9,
+                          duration: 75,
+                          useNativeDriver: true,
+                        }),
+                        Animated.spring(tabScale, {
+                          toValue: 1,
+                          tension: 240,
+                          friction: 11,
+                          useNativeDriver: true,
+                        }),
+                      ]).start();
+                    }
+                    handleSelectView(tab.key);
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Animated.View
+                    style={[
+                      styles.tabIconWrap,
+                      isActive && styles.tabIconWrapActive,
+                      { transform: [{ scale: tabScale }] },
+                    ]}
+                  >
+                    <Feather
+                      name={tab.icon as any}
+                      size={18}
+                      color={isActive ? COLORS.white : '#8d7e9c'}
+                    />
+                  </Animated.View>
+                  <Text style={[styles.tabLabel, isActive && styles.tabLabelActive]}>
+                    {tab.label}
+                  </Text>
+                  {tab.key === 'Missions' && pendingMissions > 0 && (
+                    <View style={[styles.tabBadge, isActive && styles.tabBadgeActive]}>
+                      <Text style={[styles.tabBadgeText, isActive && styles.tabBadgeTextActive]}>
+                        {pendingMissions}
+                      </Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
 
         {/* Usage Access & Consent Modal */}
         <UsagePermissionModal
@@ -1846,7 +2116,7 @@ export default function App() {
             });
             setToast('Notification history cleared.');
           }}
-          onOpenSettings={() => setActiveView('Settings')}
+          onOpenSettings={() => handleSelectView('Settings')}
           onClose={() => setNotificationCenterOpen(false)}
         />
 

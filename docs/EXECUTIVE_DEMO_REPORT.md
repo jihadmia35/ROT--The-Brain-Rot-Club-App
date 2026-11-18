@@ -1,10 +1,10 @@
 # ROT. — Executive Project Report: Phase 1 Foundation through Stage 4 Cloud Squads & Account Isolation
 
 **Project:** ROT. – The Brainrot Club (`com.rot.brainrotclub`)  
-**Current Branch:** `fix/rot-cloud-account-isolation` (Stage 3–4 Cloud Integration + Account Isolation Fixes on top of `master`)  
+**Current Branch:** `fix/rot-android-release-hardening` (PR #4 aggregate branch on `master`: Stage 3–4 Cloud Integration, Account Isolation, UI/UX & Notifications Polish, and Android v1.0 Release Hardening / RC2)  
 **Previous Milestone Branches:** `feature/rot-mvp-core` (`PR #2`, merged at `1272ada`) and `feature/rot-executive-demo` (`PR #1`, `6554c81`)  
 **Verified Hardware:** Xiaomi Redmi 11 Prime (`22071219AI`), Android 14 (API 34, MIUI / HyperOS)  
-**Document Scope:** Transition record from Phase 1 Executive Demo and Local-First MVP (`PR #1`–`PR #2`) to Stage 3–4 Cloud Authentication, Scoped XP Sync, Invite-Only Squads, and Multi-Account Isolation, cross-checked against `Software Requirements Specification and Project Plan.pdf` (v1.0, 11 November 2026)
+**Document Scope:** Transition record from Phase 1 Executive Demo and Local-First MVP (`PR #1`–`PR #2`) through Stage 3–4 Cloud Squads, Multi-Account Isolation, and Android v1.0 Signed Release Hardening (`RC2`), cross-checked against `Software Requirements Specification and Project Plan.pdf` (v1.0, 11 November 2026)
 
 ---
 
@@ -222,7 +222,7 @@ All sensitive values (account emails, full user UUIDs, raw invite codes, and tok
 2. **Unattended Wall-Clock `AlarmManager` Firing:** Scheduled alarms (`ACTION_STREAK_REMINDER`, `ACTION_EVENING_REMINDER`) were confirmed registered in `dumpsys alarm`, but waiting across real wall-clock evening/streak hours for unattended OS delivery has **not** been executed live.
 3. **Physical-Device Reboot Recovery:** `RotBootReceiver` (`BOOT_COMPLETED`, `MY_PACKAGE_REPLACED`, `TIME_SET`, `TIMEZONE_CHANGED`) is declared in `AndroidManifest.xml` and compiled, but an actual device reboot was **not** performed during wireless ADB QA.
 4. **100+ Real Notifications & `99+` Badge Overflow On-Device:** `formatUnreadBadgeCount` `99+` saturation is verified by unit tests (`domainLogic.test.ts`), while on-device QA tested `0`, `1`, and `2` real notifications (not 100+ live OS notifications).
-5. **Standalone Release APK Generation & Distribution:** Verification used the debug build (`app-debug.apk`) paired with Metro; a standalone bundled/signed release APK has **not** been built or tested on-device.
+5. **Signed Standalone Release APK Status (`RC2` Verified on Redmi 11 Prime):** Release APK `RC2` (with R8 minification, resource shrinking, `rot-upload.jks` v2 signing, and WorkManager `RoomDatabase.<init>()` ProGuard fix) has been built and verified standalone without Metro on Xiaomi Redmi 11 Prime (cold launch, WorkManager/JobScheduler/AlarmManager, Usage Access, all 6 tabs, notifications & tap routing, Guest XP increase, release SHA-1 Google Sign-In, Cloud XP sync, and live Squad loading/refresh). Broad public distribution still awaits two-device concurrent Realtime verification and PR #4 review/merge.
 
 ### Technical & Platform Constraints (Preserved from Phase 1 & SRS)
 - **App-Level Foreground Granularity Only:** `UsageStatsManager` reports foreground activity events for `com.instagram.android`, not internal Reels views; ROT labels all numbers as estimated foreground time.
@@ -234,14 +234,13 @@ All sensitive values (account emails, full user UUIDs, raw invite codes, and tok
 
 ## H. Remaining Work and Future Roadmap
 
-1. **Completed Through `fix/rot-cloud-account-isolation`:**
-   - Local-first MVP (`PR #2`), Stage 3 Supabase RLS/RPC & Google Auth foundation (`f02c5a3`), Stage 4 cloud profile/XP/Squads/Realtime notifications (`09ebd1a`), and Guest/multi-account storage isolation, cold-start Google sign-out fix, and targeted Member ID squad invitations.
-2. **Outstanding Verification (Before Release / Beta):**
+1. **Completed Through `fix/rot-android-release-hardening` (`PR #4`):**
+   - Local-first MVP (`PR #2`), Stage 3 Supabase RLS/RPC & Google Auth foundation (`f02c5a3`), Stage 4 cloud profile/XP/Squads/Realtime notifications (`09ebd1a`), Guest/multi-account storage isolation (`efaf22c`, `6f9923f`), UI/UX & notification polish (`da70fd5`), Android release hardening (`772d404`), and WorkManager R8 `RoomDatabase.<init>()` fix (`0b442d9`) verified as signed standalone **RC2** on Redmi 11 Prime.
+2. **Outstanding Verification (Before Broad Public Release):**
    - Live verification of targeted invitation accept/decline, `Leave squad`, `Remove` member, `Delete squad`, and concurrent two-device Realtime delivery.
-   - Real-time or accelerated verification of `RotAlarmReceiver` wall-clock firing, physical device reboot persistence (`RotBootReceiver`), `100+` notification badge overflow rendering on-device, and standalone release APK installation/testing without Metro.
-3. **Production-Readiness Work (Required Before Public Play Release):**
-   - Production release keystore configuration, release SHA-1 registration in Google Cloud OAuth, and Play App Signing.
-   - Google Play Console `PACKAGE_USAGE_STATS` prominent-disclosure & declaration review, privacy policy URL, cloud account-deletion Edge Function / self-service flow, and battery/accessibility audit (`AT-09` TalkBack & font-scaling pass).
+   - Real-time or accelerated verification of `RotAlarmReceiver` wall-clock firing, physical device reboot persistence (`RotBootReceiver`), and `100+` notification badge overflow rendering on-device.
+3. **Production-Readiness Work (Remaining Before Public Play Store Release):**
+   - Keystore passphrase rotation / encrypted backup, Play App Signing setup, Google Play Console `PACKAGE_USAGE_STATS` prominent-disclosure & declaration review, hosted privacy policy URL, cloud account-deletion Edge Function / self-service flow, and accessibility audit (`AT-09` TalkBack & font-scaling pass).
    - Multi-device OEM compatibility matrix testing beyond Redmi 11 Prime.
 4. **Future Enhancements & Original Planned Features Not Yet Implemented:**
    - **Social & Cosmetic Extensions:** Cloud Friends/Campus synchronization (currently labeled Local Demo Preview), multi-tier daily chest reward table & equippable cosmetic inventory (`FR-015`).
@@ -252,8 +251,8 @@ All sensitive values (account emails, full user UUIDs, raw invite codes, and tok
 
 ## I. Current Project Status
 
-- **Stage 3–4 Cloud Integration & Account Isolation:** **Implemented and verified** on branch `fix/rot-cloud-account-isolation` (based on `upstream/master` merge `1272ada`).
-- **Verification:** Automated suite passes (`tsc --noEmit` 0 errors, `lint` 44 files, `31/31` unit tests, `:app:assembleDebug` successful) and two-account Redmi 11 Prime verification confirmed Guest (`629 XP`) & Account A/B (`145 XP`, `0 -> 50 XP`) isolation, squad join/roster, invite notification, block/unblock, abuse report, preferences, ownership transfer, and targeted invite creation. Targeted invite accept/decline, leave squad, remove member, and delete squad remain explicitly **Not Verified**.
+- **Stage 3–4 Cloud Integration, Account Isolation & Android v1.0 Release Hardening (`RC2`):** **Implemented and verified** on PR #4 branch `fix/rot-android-release-hardening` (based on `upstream/master` merge `1272ada`).
+- **Verification:** Automated suite passes (`tsc --noEmit` 0 errors, `lint` 48 files, `33/33` unit tests, `:app:assembleRelease` RC2 successful, GitHub PR #4 CI passing). Signed standalone **RC2** passed single-device runtime verification on Xiaomi Redmi 11 Prime (offline cold start, WorkManager, release SHA-1 Google Sign-In, Cloud XP sync, live Squad loading, notifications, all 6 tabs, Guest XP increase). Two-account Redmi 11 Prime debug QA previously confirmed Guest (`629 XP`) & Account A/B (`145 XP`, `0 -> 50 XP`) isolation, squad join/roster, invite notification, block/unblock, abuse report, preferences, ownership transfer, and targeted invite creation. Concurrent two-device Realtime sync, targeted invite accept/decline, leave squad, remove member, and delete squad remain explicitly **Not Verified**.
 
 ---
 

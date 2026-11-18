@@ -1,5 +1,6 @@
 package com.rot.brainrotclub
 
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 
@@ -17,6 +18,25 @@ class MainActivity : ReactActivity() {
     // This is required for expo-splash-screen.
     setTheme(R.style.AppTheme);
     super.onCreate(null)
+    captureNotificationRoute(intent)
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    val route = intent.getStringExtra(RotNotificationHelper.EXTRA_TARGET_ROUTE)
+    if (!route.isNullOrBlank()) {
+      intent.removeExtra(RotNotificationHelper.EXTRA_TARGET_ROUTE)
+      UsageStatsModule.handleIncomingNotificationRoute(route)
+    }
+  }
+
+  private fun captureNotificationRoute(intent: Intent?) {
+    val route = intent?.getStringExtra(RotNotificationHelper.EXTRA_TARGET_ROUTE)
+    if (!route.isNullOrBlank()) {
+      intent.removeExtra(RotNotificationHelper.EXTRA_TARGET_ROUTE)
+      UsageStatsModule.setPendingInitialRoute(route)
+    }
   }
 
   /**

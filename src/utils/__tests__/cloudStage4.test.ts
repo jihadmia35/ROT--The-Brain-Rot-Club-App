@@ -36,6 +36,14 @@ import {
   markCloudNotificationsLocallyRead,
   upsertCloudNotificationInList,
 } from '../cloudNotificationsCore';
+import { computeScrollbarMetrics } from '../notificationScrollbarCore';
+import {
+  buildCloudNotificationMirrorSpec,
+  isCloudNotificationTypeEnabled,
+  parseNotificationTargetRoute,
+  sanitizeNotificationText,
+  selectCloudNotificationsToMirror,
+} from '../notificationMirrorsCore';
 import {
   SocialNotificationRow,
   SquadInvitationRow,
@@ -543,6 +551,183 @@ describe('ROT Stage 4.4 — Cloud Social Notifications, Unread Count & Invite Ac
     assert.equal(DEFAULT_CLOUD_NOTIFICATION_PREFS.squad_invites_enabled, true);
     assert.equal(DEFAULT_CLOUD_NOTIFICATION_PREFS.squad_activity_enabled, true);
   });
-});
 
+  it('Computes popup scrollbar metrics cleanly across 1, 10, 50, and 100 items', () => {
+    // 1 item (~110px content < 410px viewport): hidden
+    const single = computeScrollbarMetrics({
+      viewportHeight: 410,
+      contentHeight: 110,
+      scrollOffset: 0,
+    });
+    assert.equal(single.visible, false);
+
+    // 10 items (~1100px): visible thumb proportional to viewport
+    const tenTop = computeScrollbarMetrics({
+      viewportHeight: 410,
+      contentHeight: 1100,
+      scrollOffset: 0,
+    });
+    assert.equal(tenTop.visible, true);
+    assert.equal(tenTop.thumbTop, 4);
+
+    // 50 items scrolled halfway
+    const fiftyMid = computeScrollbarMetrics({
+      viewportHeight: 410,
+      contentHeight: 5500,
+      scrollOffset: (5500 - 410) / 2,
+    });
+    assert.equal(fiftyMid.visible, true);
+    assert.equal(fiftyMid.thumbHeight >= 28, true);
+
+    // 100 items clamped at bottom
+    const hundredBottom = computeScrollbarMetrics({
+      viewportHeight: 410,
+      contentHeight: 11000,
+      scrollOffset: 15000,
+    });
+    assert.equal(hundredBottom.visible, true);
+    assert.equal(
+      Math.round(hundredBottom.thumbTop + hundredBottom.thumbHeight),
+      406
+    );
+  });
+
+  it('Sanitizes notification copy, enforces user prefs & dedup, and parses tap routes', () => {
+    const cleaned = sanitizeNotificationText(
+      'Invite from alice@example.com for 7f49689f-e9e9-4536-baa1-6d3b36b2067a with Bearer abcdefghij12345',
+      200
+    );
+    assert.equal(cleaned.includes('alice@example.com'), false);
+    assert.equal(
+      cleaned.includes('7f49689f-e9e9-4536-baa1-6d3b36b2067a'),
+      false
+    );
+    assert.equal(cleaned.includes('abcdefghij12345'), false);
+
+    const inviteRow: SocialNotificationRow = {
+      id: 'n-invite',
+      recipient_user_id: 'user-1',
+      actor_user_id: 'user-2',
+      notification_type: 'squad_invite_received',
+      title: 'Squad invitation from user@example.com',
+      body: 'Join Focus Squad',
+      related_entity_id: 'inv-1',
+      related_entity_type: 'squad_invitation',
+      is_read: false,
+      read_at: null,
+      dedup_key: 'invite-key-1',
+      created_at: '2026-11-18T03:00:00Z',
+    };
+    const joinRow: SocialNotificationRow = {
+      ...inviteRow,
+      id: 'n-join',
+      notification_type: 'squad_member_joined',
+      title: 'New member joined',
+      body: 'Someone joined Focus Squad',
+      dedup_key: 'join-key-1',
+      created_at: '2026-11-18T03:05:00Z',
+    };
+    const readRow: SocialNotificationRow = {
+      ...inviteRow,
+      id: 'n-read',
+      is_read: true,
+      dedup_key: 'read-key-1',
+    };
+    const otherUserRow: SocialNotificationRow = {
+      ...inviteRow,
+      id: 'n-other',
+      recipient_user_id: 'user-2',
+    };
+
+    const spec = buildCloudNotificationMirrorSpec(
+      inviteRow,
+      'user-1',
+      DEFAULT_CLOUD_NOTIFICATION_PREFS
+    );
+    assert.equal(spec?.dedupKey, 'cloud_user-1_invite-key-1');
+    assert.equal(spec?.targetRoute, 'Leaderboard:Squad');
+    assert.equal(spec?.title.includes('user@example.com'), false);
+
+    // Respects squad_invites_enabled = false and squad_activity_enabled = false
+    assert.equal(
+      buildCloudNotificationMirrorSpec(inviteRow, 'user-1', {
+        squad_invites_enabled: false,
+        squad_activity_enabled: true,
+      }),
+      null
+    );
+    assert.equal(
+      buildCloudNotificationMirrorSpec(joinRow, 'user-1', {
+        squad_invites_enabled: true,
+        squad_activity_enabled: false,
+      }),
+      null
+    );
+
+    // Skips already-read notifications and mismatched recipient rows
+    assert.equal(
+      buildCloudNotificationMirrorSpec(
+        readRow,
+        'user-1',
+        DEFAULT_CLOUD_NOTIFICATION_PREFS
+      ),
+      null
+    );
+    assert.equal(
+      buildCloudNotificationMirrorSpec(
+        otherUserRow,
+        'user-1',
+        DEFAULT_CLOUD_NOTIFICATION_PREFS
+      ),
+      null
+    );
+
+    // Selects only unmirrored items, chronologically ordered and capped
+    const sessionMirrored = new Set<string>(['cloud_user-1_invite-key-1']);
+    const selected = selectCloudNotificationsToMirror(
+      [joinRow, inviteRow, readRow, otherUserRow],
+      'user-1',
+      DEFAULT_CLOUD_NOTIFICATION_PREFS,
+      sessionMirrored,
+      { maxBatch: 5 }
+    );
+    assert.equal(selected.length, 1);
+    assert.equal(selected[0].dedupKey, 'cloud_user-1_join-key-1');
+
+    // Route parsing
+    assert.deepEqual(parseNotificationTargetRoute('Leaderboard:Squad'), {
+      view: 'Leaderboard',
+      leaderboardTab: 'Squad',
+    });
+    assert.deepEqual(parseNotificationTargetRoute('Missions'), {
+      view: 'Missions',
+    });
+    assert.deepEqual(parseNotificationTargetRoute('NotificationCenter'), {
+      openNotificationCenter: true,
+    });
+    assert.equal(parseNotificationTargetRoute('unknown_route'), null);
+    assert.equal(parseNotificationTargetRoute(null), null);
+
+    // Foreground Realtime toast & category preference checks
+    assert.equal(
+      isCloudNotificationTypeEnabled('squad_invite_received', {
+        squad_invites_enabled: false,
+        squad_activity_enabled: true,
+      }),
+      false
+    );
+    assert.equal(
+      isCloudNotificationTypeEnabled('squad_member_joined', {
+        squad_invites_enabled: true,
+        squad_activity_enabled: false,
+      }),
+      false
+    );
+    const jwtSanitized = sanitizeNotificationText(
+      'Alert eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U',
+      90
+    );
+    assert.equal(jwtSanitized.includes('eyJhbGci'), false);
+  });
+});
 

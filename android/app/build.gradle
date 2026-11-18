@@ -109,6 +109,22 @@ android {
             }
         }
     }
+    def keystorePropertiesFile = file("${rootDir}/keystore.properties")
+    def keystoreProps = new java.util.Properties()
+    if (keystorePropertiesFile.exists()) {
+        keystorePropertiesFile.withInputStream { keystoreProps.load(it) }
+    }
+    def releaseStoreFilePath = findProperty('ROT_UPLOAD_STORE_FILE') ?: System.getenv('ROT_UPLOAD_STORE_FILE') ?: keystoreProps.getProperty('storeFile')
+    def releaseStorePassword = findProperty('ROT_UPLOAD_STORE_PASSWORD') ?: System.getenv('ROT_UPLOAD_STORE_PASSWORD') ?: keystoreProps.getProperty('storePassword')
+    def releaseKeyAlias = findProperty('ROT_UPLOAD_KEY_ALIAS') ?: System.getenv('ROT_UPLOAD_KEY_ALIAS') ?: keystoreProps.getProperty('keyAlias')
+    def releaseKeyPassword = findProperty('ROT_UPLOAD_KEY_PASSWORD') ?: System.getenv('ROT_UPLOAD_KEY_PASSWORD') ?: keystoreProps.getProperty('keyPassword')
+    def resolvedReleaseKeystore = releaseStoreFilePath ? file(releaseStoreFilePath) : null
+    def hasReleaseSigning = resolvedReleaseKeystore != null &&
+        resolvedReleaseKeystore.exists() &&
+        releaseStorePassword &&
+        releaseKeyAlias &&
+        releaseKeyPassword
+
     signingConfigs {
         debug {
             storeFile file('debug.keystore')
@@ -116,16 +132,26 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        if (hasReleaseSigning) {
+            release {
+                storeFile resolvedReleaseKeystore
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
-            def enableShrinkResources = findProperty('android.enableShrinkResourcesInReleaseBuilds') ?: 'false'
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            } else {
+                logger.warn("[ROT RELEASE WARNING] Production upload keystore is not configured (set android/keystore.properties or ROT_UPLOAD_* env/Gradle properties). Producing unsigned release artifact; never ship debug-signed builds to production.")
+            }
+            def enableShrinkResources = findProperty('android.enableShrinkResourcesInReleaseBuilds') ?: 'true'
             shrinkResources enableShrinkResources.toBoolean()
             minifyEnabled enableMinifyInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"

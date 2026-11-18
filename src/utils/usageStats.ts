@@ -68,6 +68,7 @@ type RotUsageStatsNativeModule = {
   areNotificationsEnabled?(): Promise<boolean>;
   getNotificationStatus?(): Promise<NotificationStatusSnapshot>;
   openNotificationSettings?(channelId: string | null): Promise<boolean>;
+  openBatteryOptimizationSettings?(): Promise<boolean>;
   syncNotificationConfig?(config: NotificationSyncPayload): Promise<boolean>;
   triggerBackgroundUsageCheckNow?(): Promise<boolean>;
   postLocalNotification?(
@@ -75,6 +76,13 @@ type RotUsageStatsNativeModule = {
     title: string,
     body: string
   ): Promise<boolean>;
+  postCloudMirrorNotification?(
+    dedupKey: string,
+    title: string,
+    body: string,
+    targetRoute: string | null
+  ): Promise<boolean>;
+  getInitialNotificationRoute?(): Promise<string | null>;
   getNotificationInbox?(): Promise<NotificationInboxSnapshot>;
   markAllNotificationsRead?(): Promise<NotificationInboxSnapshot>;
   clearNotificationHistory?(): Promise<NotificationInboxSnapshot>;
@@ -142,6 +150,8 @@ export async function fetchNotificationStatus(): Promise<NotificationStatusSnaps
       appNotificationsEnabled: false,
       nudgesChannelEnabled: false,
       remindersChannelEnabled: false,
+      squadsChannelEnabled: false,
+      ignoringBatteryOptimizations: false,
       statusCode: 'notifications_off',
       quietHoursActiveNow: false,
       sentKeysToday: [],
@@ -155,6 +165,8 @@ export async function fetchNotificationStatus(): Promise<NotificationStatusSnaps
       appNotificationsEnabled: false,
       nudgesChannelEnabled: false,
       remindersChannelEnabled: false,
+      squadsChannelEnabled: false,
+      ignoringBatteryOptimizations: false,
       statusCode: 'notifications_off',
       quietHoursActiveNow: false,
       sentKeysToday: [],
@@ -170,6 +182,20 @@ export async function openAndroidNotificationSettings(
   }
   try {
     return await NativeRotUsageStats.openNotificationSettings(channelId);
+  } catch {
+    return false;
+  }
+}
+
+export async function openAndroidBatteryOptimizationSettings(): Promise<boolean> {
+  if (
+    Platform.OS !== 'android' ||
+    !NativeRotUsageStats?.openBatteryOptimizationSettings
+  ) {
+    return false;
+  }
+  try {
+    return await NativeRotUsageStats.openBatteryOptimizationSettings();
   } catch {
     return false;
   }
@@ -226,6 +252,25 @@ export async function checkAndRequestNotificationPermission(): Promise<boolean> 
   }
 }
 
+export async function hasNotificationPermissionSilent(): Promise<boolean> {
+  if (Platform.OS !== 'android') return false;
+  try {
+    if (typeof Platform.Version === 'number' && Platform.Version >= 33) {
+      const permission = PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS;
+      if (permission) {
+        const granted = await PermissionsAndroid.check(permission);
+        if (!granted) return false;
+      }
+    }
+    if (NativeRotUsageStats?.areNotificationsEnabled) {
+      return await NativeRotUsageStats.areNotificationsEnabled();
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function sendLocalNotification(
   notificationId: number,
   title: string,
@@ -243,6 +288,61 @@ export async function sendLocalNotification(
   } catch {
     return false;
   }
+}
+
+export async function postCloudMirrorOsNotification(
+  dedupKey: string,
+  title: string,
+  body: string,
+  targetRoute: string | null = null
+): Promise<boolean> {
+  if (
+    Platform.OS !== 'android' ||
+    !NativeRotUsageStats?.postCloudMirrorNotification
+  ) {
+    return false;
+  }
+  try {
+    return await NativeRotUsageStats.postCloudMirrorNotification(
+      dedupKey,
+      title,
+      body,
+      targetRoute
+    );
+  } catch {
+    return false;
+  }
+}
+
+export async function getInitialNotificationRoute(): Promise<string | null> {
+  if (
+    Platform.OS !== 'android' ||
+    !NativeRotUsageStats?.getInitialNotificationRoute
+  ) {
+    return null;
+  }
+  try {
+    return await NativeRotUsageStats.getInitialNotificationRoute();
+  } catch {
+    return null;
+  }
+}
+
+export function subscribeToNotificationOpens(
+  listener: (route: string) => void
+): () => void {
+  if (Platform.OS !== 'android') {
+    return () => {};
+  }
+  const sub = DeviceEventEmitter.addListener(
+    'RotNotificationOpened',
+    (route: unknown) => {
+      if (typeof route === 'string' && route.trim().length > 0) {
+        listener(route);
+      }
+    }
+  );
+  return () => sub.remove();
 }
 
 export async function fetchNotificationInbox(): Promise<NotificationInboxSnapshot> {

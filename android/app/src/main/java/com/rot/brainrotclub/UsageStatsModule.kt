@@ -24,9 +24,37 @@ class UsageStatsModule(reactContext: ReactApplicationContext) :
         const val NAME = "RotUsageStats"
         const val INSTAGRAM_PACKAGE = RotUsageTracker.INSTAGRAM_PACKAGE
         const val EVENT_NOTIFICATIONS_UPDATED = "RotNotificationsUpdated"
+        const val EVENT_NOTIFICATION_OPENED = "RotNotificationOpened"
 
         @Volatile
         private var activeContextRef: WeakReference<ReactApplicationContext>? = null
+
+        @Volatile
+        private var pendingNotificationRoute: String? = null
+
+        private val routeLock = Any()
+
+        fun setPendingInitialRoute(route: String?) {
+            if (route.isNullOrBlank()) return
+            synchronized(routeLock) {
+                pendingNotificationRoute = route
+            }
+        }
+
+        fun handleIncomingNotificationRoute(route: String?) {
+            if (route.isNullOrBlank()) return
+            val ctx = activeContextRef?.get()
+            if (ctx != null && ctx.hasActiveReactInstance()) {
+                try {
+                    ctx.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                        .emit(EVENT_NOTIFICATION_OPENED, route)
+                    return
+                } catch (_: Exception) {
+                    // Fallback to pending route if JS instance not ready
+                }
+            }
+            setPendingInitialRoute(route)
+        }
 
         fun emitNotificationsUpdated() {
             try {
@@ -184,6 +212,9 @@ class UsageStatsModule(reactContext: ReactApplicationContext) :
                 putBoolean("appNotificationsEnabled", status.appNotificationsEnabled)
                 putBoolean("nudgesChannelEnabled", status.nudgesChannelEnabled)
                 putBoolean("remindersChannelEnabled", status.remindersChannelEnabled)
+                putBoolean("squadsChannelEnabled", status.squadsChannelEnabled)
+                putBoolean("ignoringBatteryOptimizations", status.ignoringBatteryOptimizations)
+                putString("deviceManufacturer", status.deviceManufacturer)
                 putString("statusCode", status.statusCode)
                 putBoolean("quietHoursActiveNow", RotNotificationPrefs.isWithinQuietHours(config))
                 putArray("sentKeysToday", sentArr)
@@ -195,11 +226,53 @@ class UsageStatsModule(reactContext: ReactApplicationContext) :
                 putBoolean("appNotificationsEnabled", false)
                 putBoolean("nudgesChannelEnabled", false)
                 putBoolean("remindersChannelEnabled", false)
+                putBoolean("squadsChannelEnabled", false)
+                putBoolean("ignoringBatteryOptimizations", false)
+                putString("deviceManufacturer", Build.MANUFACTURER ?: "unknown")
                 putString("statusCode", "notifications_off")
                 putBoolean("quietHoursActiveNow", false)
                 putArray("sentKeysToday", Arguments.createArray())
             }
             promise.resolve(map)
+        }
+    }
+
+    @ReactMethod
+    fun openBatteryOptimizationSettings(promise: Promise) {
+        try {
+            val context = reactApplicationContext
+            val batteryIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            } else {
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.fromParts("package", context.packageName, null)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            }
+            val detailsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.fromParts("package", context.packageName, null)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            // Prefer App Details on Xiaomi/Redmi so user can access both Battery Saver & Autostart directly
+            val preferred = if ((Build.MANUFACTURER ?: "").contains("xiaomi", ignoreCase = true) ||
+                (Build.MANUFACTURER ?: "").contains("redmi", ignoreCase = true) ||
+                (Build.MANUFACTURER ?: "").contains("poco", ignoreCase = true)
+            ) {
+                detailsIntent
+            } else {
+                batteryIntent
+            }
+            try {
+                context.startActivity(preferred)
+                promise.resolve(true)
+            } catch (_: Exception) {
+                context.startActivity(detailsIntent)
+                promise.resolve(true)
+            }
+        } catch (e: Exception) {
+            promise.reject("OPEN_BATTERY_SETTINGS_ERROR", "Unable to open battery settings: ${e.message}", e)
         }
     }
 
@@ -323,6 +396,42 @@ class UsageStatsModule(reactContext: ReactApplicationContext) :
             promise.resolve(posted)
         } catch (_: Exception) {
             promise.resolve(false)
+        }
+    }
+
+    @ReactMethod
+    fun postCloudMirrorNotification(
+        dedupKey: String,
+        title: String,
+        body: String,
+        targetRoute: String?,
+        promise: Promise
+    ) {
+        try {
+            val posted = RotNotificationHelper.postCloudMirrorNotification(
+                context = reactApplicationContext,
+                dedupKey = dedupKey,
+                title = title,
+                body = body,
+                targetRoute = targetRoute
+            )
+            promise.resolve(posted)
+        } catch (_: Exception) {
+            promise.resolve(false)
+        }
+    }
+
+    @ReactMethod
+    fun getInitialNotificationRoute(promise: Promise) {
+        try {
+            val consumed = synchronized(routeLock) {
+                val route = pendingNotificationRoute
+                pendingNotificationRoute = null
+                route
+            }
+            promise.resolve(consumed)
+        } catch (_: Exception) {
+            promise.resolve(null)
         }
     }
 

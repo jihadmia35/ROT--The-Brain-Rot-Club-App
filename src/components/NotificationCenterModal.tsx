@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Animated,
+  FlatList,
   Modal,
-  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -19,6 +20,8 @@ import {
 import { CloudAuthStatus } from '../utils/authHelpers';
 import { formatCloudNotificationCategoryLabel } from '../utils/cloudNotificationsCore';
 import { getLocalDateKey } from '../utils/domainLogic';
+import { computeScrollbarMetrics } from '../utils/notificationScrollbarCore';
+import { useReducedMotion } from '../utils/useReducedMotion';
 import Icon from './Icon';
 
 type Props = {
@@ -37,6 +40,22 @@ type Props = {
   onOpenSettings: () => void;
   onClose: () => void;
 };
+
+type PopupRow =
+  | { kind: 'header'; key: string; title: string; marginTop?: number }
+  | {
+      kind: 'cloud';
+      key: string;
+      notification: SocialNotificationRow;
+      isJustRead: boolean;
+      pendingInvite?: SquadInvitationRow;
+    }
+  | {
+      kind: 'local';
+      key: string;
+      item: NotificationInboxItem;
+      isJustRead: boolean;
+    };
 
 function formatCloudIsoTime(iso: string): string {
   const dateObj = new Date(iso);
@@ -83,10 +102,117 @@ export default function NotificationCenterModal({
   onOpenSettings,
   onClose,
 }: Props) {
-  const highlightedSet = new Set(highlightedUnreadIds);
-  const highlightedCloudSet = new Set(highlightedCloudUnreadIds);
+  const listRef = useRef<FlatList<PopupRow>>(null);
+  const reducedMotion = useReducedMotion();
+  const sheetScale = useRef(new Animated.Value(0.95)).current;
+  const sheetTranslateY = useRef(new Animated.Value(12)).current;
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const [contentHeight, setContentHeight] = useState(0);
+  const [scrollOffset, setScrollOffset] = useState(0);
+
   const hasPermissionIssue = notificationStatus.statusCode !== 'allowed';
-  const totalItemsCount = items.length + cloudNotifications.length;
+  const showCloudSection =
+    cloudAuthStatus === 'authenticated' && cloudNotifications.length > 0;
+  const totalItemsCount =
+    items.length + (cloudAuthStatus === 'authenticated' ? cloudNotifications.length : 0);
+
+  const rows = useMemo<PopupRow[]>(() => {
+    const highlightedSet = new Set(highlightedUnreadIds);
+    const highlightedCloudSet = new Set(highlightedCloudUnreadIds);
+    const out: PopupRow[] = [];
+
+    if (showCloudSection) {
+      out.push({
+        kind: 'header',
+        key: 'header-cloud',
+        title: 'ROT CLUB · CLOUD UPDATES',
+      });
+      for (const cn of cloudNotifications) {
+        const pendingInv =
+          cn.notification_type === 'squad_invite_received' && cn.related_entity_id
+            ? pendingInvitesById[cn.related_entity_id]
+            : undefined;
+        out.push({
+          kind: 'cloud',
+          key: `cloud-${cn.id}`,
+          notification: cn,
+          isJustRead: highlightedCloudSet.has(cn.id),
+          pendingInvite: pendingInv,
+        });
+      }
+    }
+
+    if (items.length > 0) {
+      if (showCloudSection) {
+        out.push({
+          kind: 'header',
+          key: 'header-local',
+          title: 'THIS DEVICE · LOCAL REMINDERS',
+          marginTop: 4,
+        });
+      }
+      for (const item of items) {
+        out.push({
+          kind: 'local',
+          key: item.id,
+          item,
+          isJustRead: highlightedSet.has(item.id),
+        });
+      }
+    }
+
+    return out;
+  }, [
+    showCloudSection,
+    cloudNotifications,
+    highlightedCloudUnreadIds,
+    pendingInvitesById,
+    items,
+    highlightedUnreadIds,
+  ]);
+
+  useEffect(() => {
+    if (visible) {
+      setScrollOffset(0);
+      listRef.current?.scrollToOffset({ offset: 0, animated: false });
+      if (reducedMotion) {
+        sheetScale.setValue(1);
+        sheetTranslateY.setValue(0);
+      } else {
+        sheetScale.setValue(0.95);
+        sheetTranslateY.setValue(12);
+        Animated.parallel([
+          Animated.spring(sheetScale, {
+            toValue: 1,
+            tension: 165,
+            friction: 14,
+            useNativeDriver: true,
+          }),
+          Animated.timing(sheetTranslateY, {
+            toValue: 0,
+            duration: 180,
+            useNativeDriver: true,
+          }),
+        ]).start();
+      }
+    } else {
+      setViewportHeight(0);
+      setContentHeight(0);
+      setScrollOffset(0);
+    }
+  }, [visible, reducedMotion, sheetScale, sheetTranslateY]);
+
+  const scrollbar = useMemo(
+    () =>
+      computeScrollbarMetrics({
+        viewportHeight,
+        contentHeight,
+        scrollOffset,
+        minThumbHeight: 30,
+        trackPadding: 4,
+      }),
+    [viewportHeight, contentHeight, scrollOffset]
+  );
 
   return (
     <Modal
@@ -96,7 +222,18 @@ export default function NotificationCenterModal({
       onRequestClose={onClose}
     >
       <View style={styles.backdrop}>
-        <View style={styles.sheet}>
+        <Animated.View
+          style={[
+            styles.sheet,
+            {
+              transform: [
+                { translateY: sheetTranslateY },
+                { scale: sheetScale },
+              ],
+            },
+          ]}
+        >
+          {/* Fixed Header */}
           <View style={styles.headerRow}>
             <View style={{ flex: 1 }}>
               <Text style={styles.eyebrow}>NOTIFICATION CENTER</Text>
@@ -145,7 +282,7 @@ export default function NotificationCenterModal({
             </View>
           )}
 
-          {totalItemsCount === 0 ? (
+          {totalItemsCount === 0 || rows.length === 0 ? (
             <View style={styles.emptyBox}>
               <View style={styles.emptyIconWrap}>
                 <Icon name="bell" size={22} color={COLORS.purple} />
@@ -156,37 +293,65 @@ export default function NotificationCenterModal({
               </Text>
             </View>
           ) : (
-            <ScrollView
-              style={styles.listScroll}
-              contentContainerStyle={styles.listContent}
-              showsVerticalScrollIndicator={false}
-            >
-              {cloudAuthStatus === 'authenticated' && cloudNotifications.length > 0 ? (
-                <>
-                  <Text style={styles.groupEyebrow}>ROT CLUB · CLOUD UPDATES</Text>
-                  {cloudNotifications.map((cn) => {
-                    const isJustRead = highlightedCloudSet.has(cn.id);
-                    const pendingInv =
-                      cn.notification_type === 'squad_invite_received' &&
-                      cn.related_entity_id
-                        ? pendingInvitesById[cn.related_entity_id]
-                        : undefined;
+            <View style={styles.listViewport}>
+              <FlatList
+                ref={listRef}
+                data={rows}
+                keyExtractor={(row) => row.key}
+                style={styles.listScroll}
+                contentContainerStyle={[
+                  styles.listContent,
+                  scrollbar.visible && styles.listContentWithScrollbar,
+                ]}
+                showsVerticalScrollIndicator={false}
+                nestedScrollEnabled
+                initialNumToRender={16}
+                maxToRenderPerBatch={20}
+                windowSize={7}
+                scrollEventThrottle={16}
+                onLayout={(e) => {
+                  setViewportHeight(e.nativeEvent.layout.height);
+                }}
+                onContentSizeChange={(_w, h) => {
+                  setContentHeight(h);
+                }}
+                onScroll={(e) => {
+                  setScrollOffset(e.nativeEvent.contentOffset.y);
+                }}
+                renderItem={({ item: row }) => {
+                  if (row.kind === 'header') {
+                    return (
+                      <Text
+                        style={[
+                          styles.groupEyebrow,
+                          row.marginTop ? { marginTop: row.marginTop } : null,
+                        ]}
+                      >
+                        {row.title}
+                      </Text>
+                    );
+                  }
+
+                  if (row.kind === 'cloud') {
+                    const cn = row.notification;
+                    const pendingInv = row.pendingInvite;
                     return (
                       <View
-                        key={`cloud-${cn.id}`}
                         style={[
                           styles.itemCard,
                           styles.cloudItemCard,
-                          isJustRead && styles.itemCardUnread,
+                          row.isJustRead && styles.itemCardUnread,
                         ]}
                       >
                         <View style={styles.itemMetaRow}>
                           <View style={styles.cloudCategoryChip}>
                             <Text style={styles.cloudCategoryChipText}>
-                              {formatCloudNotificationCategoryLabel(cn.notification_type)}
+                              {formatCloudNotificationCategoryLabel(
+                                cn.notification_type
+                              )}
                             </Text>
                           </View>
-                          {isJustRead && (
+                          {row.isJustRead && (
                             <View style={styles.newChip}>
                               <Text style={styles.newChipText}>NEW</Text>
                             </View>
@@ -201,10 +366,14 @@ export default function NotificationCenterModal({
                           <View style={styles.inviteActionRow}>
                             <TouchableOpacity
                               style={styles.acceptBtn}
-                              onPress={() => onAcceptSquadInvite(pendingInv.invite_code)}
+                              onPress={() =>
+                                onAcceptSquadInvite(pendingInv.invite_code)
+                              }
                               disabled={inviteActionBusy}
                             >
-                              <Text style={styles.acceptBtnText}>Accept invite</Text>
+                              <Text style={styles.acceptBtnText}>
+                                Accept invite
+                              </Text>
                             </TouchableOpacity>
                             <TouchableOpacity
                               style={styles.declineBtn}
@@ -217,52 +386,54 @@ export default function NotificationCenterModal({
                         ) : null}
                       </View>
                     );
-                  })}
-                </>
-              ) : null}
+                  }
 
-              {items.length > 0 ? (
-                <>
-                  {cloudAuthStatus === 'authenticated' && cloudNotifications.length > 0 ? (
-                    <Text style={[styles.groupEyebrow, { marginTop: 4 }]}>
-                      THIS DEVICE · LOCAL REMINDERS
-                    </Text>
-                  ) : null}
-                  {items.map((item) => {
-                    const isJustRead = highlightedSet.has(item.id);
-                    return (
-                      <View
-                        key={item.id}
-                        style={[
-                          styles.itemCard,
-                          isJustRead && styles.itemCardUnread,
-                        ]}
-                      >
-                        <View style={styles.itemMetaRow}>
-                          <View style={styles.categoryChip}>
-                            <Text style={styles.categoryChipText}>
-                              {getCategoryLabel(item)}
-                            </Text>
-                          </View>
-                          {isJustRead && (
-                            <View style={styles.newChip}>
-                              <Text style={styles.newChipText}>NEW</Text>
-                            </View>
-                          )}
-                          <Text style={styles.timeText}>
-                            {formatNotificationTime(item)}
+                  const item = row.item;
+                  return (
+                    <View
+                      style={[
+                        styles.itemCard,
+                        row.isJustRead && styles.itemCardUnread,
+                      ]}
+                    >
+                      <View style={styles.itemMetaRow}>
+                        <View style={styles.categoryChip}>
+                          <Text style={styles.categoryChipText}>
+                            {getCategoryLabel(item)}
                           </Text>
                         </View>
-                        <Text style={styles.itemTitle}>{item.title}</Text>
-                        <Text style={styles.itemBody}>{item.body}</Text>
+                        {row.isJustRead && (
+                          <View style={styles.newChip}>
+                            <Text style={styles.newChipText}>NEW</Text>
+                          </View>
+                        )}
+                        <Text style={styles.timeText}>
+                          {formatNotificationTime(item)}
+                        </Text>
                       </View>
-                    );
-                  })}
-                </>
-              ) : null}
-            </ScrollView>
+                      <Text style={styles.itemTitle}>{item.title}</Text>
+                      <Text style={styles.itemBody}>{item.body}</Text>
+                    </View>
+                  );
+                }}
+              />
+
+              {scrollbar.visible && (
+                <View pointerEvents="none" style={styles.scrollbarTrack}>
+                  <View
+                    style={[
+                      styles.scrollbarThumb,
+                      {
+                        height: scrollbar.thumbHeight,
+                        transform: [{ translateY: scrollbar.thumbTop - 4 }],
+                      },
+                    ]}
+                  />
+                </View>
+              )}
+            </View>
           )}
-        </View>
+        </Animated.View>
       </View>
     </Modal>
   );
@@ -382,12 +553,34 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     marginTop: 6,
   },
+  listViewport: {
+    position: 'relative',
+    maxHeight: 410,
+  },
   listScroll: {
-    maxHeight: 400,
+    maxHeight: 410,
   },
   listContent: {
     gap: 10,
     paddingBottom: 4,
+  },
+  listContentWithScrollbar: {
+    paddingRight: 13,
+  },
+  scrollbarTrack: {
+    position: 'absolute',
+    top: 4,
+    bottom: 4,
+    right: 1,
+    width: 5,
+    borderRadius: 999,
+    backgroundColor: 'rgba(65, 29, 108, 0.12)',
+    overflow: 'hidden',
+  },
+  scrollbarThumb: {
+    width: 5,
+    borderRadius: 999,
+    backgroundColor: 'rgba(243, 44, 135, 0.62)',
   },
   itemCard: {
     backgroundColor: COLORS.white,

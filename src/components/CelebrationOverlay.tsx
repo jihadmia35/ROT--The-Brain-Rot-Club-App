@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { COLORS, RADIUS } from '../constants/theme';
 import { Celebration } from '../constants/types';
+import { useReducedMotion } from '../utils/useReducedMotion';
 import Icon from './Icon';
 
 type Props = {
@@ -17,6 +18,42 @@ type Props = {
 };
 
 export default function CelebrationOverlay({ celebration, onClose }: Props) {
+  const reducedMotion = useReducedMotion();
+  const cardOpacity = useRef(new Animated.Value(reducedMotion ? 1 : 0)).current;
+  const cardScale = useRef(new Animated.Value(reducedMotion ? 1 : 0.9)).current;
+  const orbScale = useRef(new Animated.Value(reducedMotion ? 1 : 0.72)).current;
+
+  useEffect(() => {
+    if (reducedMotion) {
+      cardOpacity.setValue(1);
+      cardScale.setValue(1);
+      orbScale.setValue(1);
+      return;
+    }
+    cardOpacity.setValue(0);
+    cardScale.setValue(0.9);
+    orbScale.setValue(0.72);
+    Animated.parallel([
+      Animated.timing(cardOpacity, {
+        toValue: 1,
+        duration: 180,
+        useNativeDriver: true,
+      }),
+      Animated.spring(cardScale, {
+        toValue: 1,
+        tension: 150,
+        friction: 11,
+        useNativeDriver: true,
+      }),
+      Animated.spring(orbScale, {
+        toValue: 1,
+        tension: 170,
+        friction: 9,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [celebration.title, reducedMotion, cardOpacity, cardScale, orbScale]);
+
   const bgColor =
     celebration.kind === 'badge'
       ? COLORS.yellow
@@ -32,7 +69,7 @@ export default function CelebrationOverlay({ celebration, onClose }: Props) {
       : COLORS.white;
 
   return (
-    <Modal transparent animationType="fade" visible>
+    <Modal transparent animationType="fade" visible onRequestClose={onClose}>
       <View style={styles.backdrop}>
         {/* Confetti dots */}
         {Array.from({ length: 12 }, (_, i) => (
@@ -50,14 +87,27 @@ export default function CelebrationOverlay({ celebration, onClose }: Props) {
           />
         ))}
 
-        <View style={styles.card}>
-          <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
+        <Animated.View
+          style={[
+            styles.card,
+            {
+              opacity: cardOpacity,
+              transform: [{ scale: cardScale }],
+            },
+          ]}
+        >
+          <TouchableOpacity style={styles.closeBtn} onPress={onClose} activeOpacity={0.75}>
             <Icon name="x" size={18} color={COLORS.muted} />
           </TouchableOpacity>
 
-          <View style={[styles.iconOrb, { backgroundColor: bgColor }]}>
+          <Animated.View
+            style={[
+              styles.iconOrb,
+              { backgroundColor: bgColor, transform: [{ scale: orbScale }] },
+            ]}
+          >
             <Icon name={celebration.iconName} size={36} color={iconColor} />
-          </View>
+          </Animated.View>
 
           <Text style={styles.eyebrow}>{celebration.reward}</Text>
           <Text style={styles.title}>{celebration.title}</Text>
@@ -67,7 +117,7 @@ export default function CelebrationOverlay({ celebration, onClose }: Props) {
             <Text style={styles.buttonText}>Keep the good energy</Text>
             <Icon name="sparkles" size={14} color={COLORS.white} />
           </TouchableOpacity>
-        </View>
+        </Animated.View>
       </View>
     </Modal>
   );
